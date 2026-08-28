@@ -423,7 +423,7 @@ def resume_cf_submission(run_dir):
         record["failure_reason"] = None
         return_code = 0
     else:
-        record["final_status"] = "SUBMISSION_BLOCKED"
+        record["final_status"] = result.get("status", "MANUAL_SUBMISSION_TIMEOUT")
         record["failure_reason"] = result.get("failure_reason", "CF_SUBMISSION_NOT_FOUND")
         return_code = 1
     record["total_time_sec"] = round(
@@ -650,6 +650,9 @@ def main():
         oj_status = record.get("oj", {}).get("status")
         if record["oj"].get("submitted") and oj_status:
             record["final_status"] = oj_status
+        elif record["oj"].get("failure_reason"):
+            record["final_status"] = oj_status or "MANUAL_SUBMISSION_TIMEOUT"
+            record["failure_reason"] = record["oj"].get("failure_reason")
         elif record["oj"].get("submit_clicked"):
             record["final_status"] = "SUBMISSION_BLOCKED"
             record["failure_reason"] = record["oj"].get("failure_reason")

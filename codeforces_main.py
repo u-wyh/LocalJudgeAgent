@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from pathlib import Path
 
 
@@ -14,6 +15,8 @@ LOGIN_URL = "https://codeforces.com/enter"
 PROFILE_DIR = Path.home() / ".local" / "share" / "LocalJudgeAgent" / "codeforces-profile"
 CONFIG_PATH = Path.home() / ".config" / "LocalJudgeAgent" / "codeforces.json"
 COMPILER_PRIORITY = ("GNU G++23", "GNU G++20", "GNU G++17")
+MANUAL_SUBMISSION_TIMEOUT_SEC = 300
+SUBMISSION_POLL_SEC = 2.5
 
 
 class CodeforcesMainError(Exception):
@@ -249,22 +252,44 @@ def fill_source(page, form, code_path):
     return expected
 
 
-def anti_bot_required(page):
+def canonicalize_codeforces_display_source(text):
+    if text.startswith("\ufeff"):
+        text = text[1:]
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = ["" if line == "\u00a0" else line for line in text.split("\n")]
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
+def matching_submission(submissions, before_id, contest_id, index, expected_source,
+                        source_loader, rejected_ids=None):
+    rejected_ids = rejected_ids if rejected_ids is not None else set()
+    candidates = sorted((item for item in submissions
+                         if item.get("id", 0) > before_id
+                         and item.get("contestId") == contest_id
+                         and item.get("problem", {}).get("index") == index
+                         and item.get("id") not in rejected_ids),
+                        key=lambda item: item["id"])
+    expected = canonicalize_codeforces_display_source(expected_source)
+    for submission in candidates:
+        actual = canonicalize_codeforces_display_source(source_loader(submission["id"]))
+        if actual == expected:
+            return submission
+        rejected_ids.add(submission["id"])
+        print(f"[Codeforces] Ignored source-mismatched submission: {submission['id']}")
+    return None
+
+
+def read_submission_source(context, contest_id, submission_id):
+    page = context.new_page()
     try:
-        return "please complete the anti-bot verification" in page.locator("body").inner_text().lower()
-    except Exception:
-        return False
-
-
-def blocked_result(digest, clicks, history, reason, before_id):
-    return {
-        "provider": "codeforces-main", "submit_clicked": clicks > 0,
-        "browser_submit_clicks": clicks, "browser_submit_history": history,
-        "submitted": False, "submission_confirmed": False, "submission_id": None,
-        "status": "SUBMISSION_BLOCKED", "raw_status": reason,
-        "failure_reason": reason, "before_submission_id": before_id,
-        "submission_sha256": digest,
-    }
+        page.goto(f"https://codeforces.com/contest/{contest_id}/submission/{submission_id}",
+                  wait_until="domcontentloaded", timeout=30000)
+        source = page.locator("#program-source-text")
+        if source.count() != 1 or not source.first.is_visible():
+            raise CodeforcesMainError("Codeforces submission source is unavailable.")
+        return source.first.inner_text()
+    finally:
+        page.close()
 
 
 def inspect(contest_id, index, code_path, dry_fill=False):
@@ -301,16 +326,14 @@ def submit_and_wait(problem, code_path):
     if problem.get("contest_phase") != "FINISHED":
         raise CodeforcesMainError("ACTIVE_CONTEST_NOT_SUPPORTED")
     require_gui()
-    from codeforces import get_user_submissions, wait_for_submission, wait_for_verdict
+    from codeforces import get_user_submissions, wait_for_verdict
     handle = configured_handle()
     before = get_user_submissions(handle)
     before_id = max((item.get("id", 0) for item in before), default=0)
-    clicks = 0
-    history = []
     with playwright_api()() as playwright:
         context = open_context(playwright)
         try:
-            page = context.pages[0] if context.pages else context.new_page()
+            page = context.new_page()
             page.goto(HOME_URL, wait_until="domcontentloaded", timeout=30000)
             if logged_in_handle(page) != handle:
                 raise CodeforcesMainError("Codeforces login handle mismatch.")
@@ -318,42 +341,43 @@ def submit_and_wait(problem, code_path):
             form = locate_form(page, problem["contest_id"], problem["index"])
             select_compiler(form)
             digest = fill_source(page, form, code_path)
-            form["submit"].click()
-            clicks += 1
-            if anti_bot_required(page):
-                history.append({"click": clicks, "result": "CF_ANTI_BOT_REQUIRED",
-                                "submission_created": False})
-                print("[Codeforces] Anti-bot verification requires manual completion.")
-                print("[Codeforces] Complete it in the opened browser.")
-                input("[Codeforces] Press Enter after verification is complete.")
-                page.goto(HOME_URL, wait_until="domcontentloaded", timeout=30000)
-                if logged_in_handle(page) != handle:
-                    return blocked_result(digest, clicks, history, "CF_LOGIN_LOST", before_id)
-                open_submit_page(page, problem["contest_id"], problem["index"])
-                form = locate_form(page, problem["contest_id"], problem["index"])
-                select_compiler(form)
-                digest = fill_source(page, form, code_path)
-                print("[Codeforces] Submit form restored and source re-verified.")
-                form["submit"].click()
-                clicks += 1
-                if anti_bot_required(page):
-                    history.append({"click": clicks, "result": "CF_ANTI_BOT_REQUIRED",
-                                    "submission_created": False})
-                    return blocked_result(digest, clicks, history, "CF_ANTI_BOT_REQUIRED", before_id)
-
-            submission = wait_for_submission(
-                handle, before_id, problem["contest_id"], problem["index"])
+            print("[Codeforces] Submission form prepared.")
+            print("[Codeforces] Complete anti-bot verification if required.")
+            print("[Codeforces] Click Submit manually in the browser.")
+            print("[Codeforces] Waiting for official submission...")
+            expected_source = code_path.read_text(encoding="utf-8")
+            rejected_ids = set()
+            deadline = time.monotonic() + MANUAL_SUBMISSION_TIMEOUT_SEC
+            submission = None
+            while time.monotonic() < deadline:
+                submissions = get_user_submissions(handle)
+                submission = matching_submission(
+                    submissions, before_id, problem["contest_id"], problem["index"],
+                    expected_source,
+                    lambda submission_id: read_submission_source(
+                        context, problem["contest_id"], submission_id),
+                    rejected_ids)
+                if submission:
+                    break
+                time.sleep(SUBMISSION_POLL_SEC)
             if not submission:
-                history.append({"click": clicks, "result": "CF_SUBMISSION_NOT_FOUND",
-                                "submission_created": False})
-                return blocked_result(digest, clicks, history, "CF_SUBMISSION_NOT_FOUND", before_id)
+                return {
+                    "provider": "codeforces-main", "manual_submit": True,
+                    "submit_clicked": False,
+                    "submitted": False, "submission_confirmed": False,
+                    "submission_id": None, "source_match": False,
+                    "status": "MANUAL_SUBMISSION_TIMEOUT",
+                    "raw_status": "MANUAL_SUBMISSION_TIMEOUT",
+                    "failure_reason": "MANUAL_SUBMISSION_TIMEOUT",
+                    "before_submission_id": before_id, "submission_sha256": digest,
+                }
             submission_id = submission["id"]
-            history.append({"click": clicks, "result": "SUBMISSION_CONFIRMED",
-                            "submission_created": True, "submission_id": submission_id})
+            print(f"[Codeforces] Submission detected: {submission_id}")
             result = wait_for_verdict(handle, submission_id)
-            result.update({"provider": "codeforces-main", "submit_clicked": True,
-                           "browser_submit_clicks": clicks, "browser_submit_history": history,
+            result.update({"provider": "codeforces-main", "manual_submit": True,
+                           "submit_clicked": False,
                            "submitted": True, "submission_confirmed": True,
+                           "source_match": True,
                            "before_submission_id": before_id, "submission_sha256": digest})
             return result
         finally:
