@@ -110,17 +110,32 @@ def last_visible(locator):
 def open_submission_form(page, problem_id):
     page.goto(f"https://www.luogu.com.cn/problem/{problem_id}",
               wait_until="domcontentloaded", timeout=30000)
+    if not re.search(rf"/problem/{re.escape(problem_id)}(?:$|[?#])", page.url):
+        raise MainSiteError("PROBLEM_ID_MISMATCH")
     candidates = [
-        page.get_by_role("button", name=re.compile(r"^(提交|提交代码|Submit)$", re.I)),
-        page.get_by_role("link", name=re.compile(r"^(提交|提交代码|Submit)$", re.I)),
-        page.get_by_text(re.compile(r"^提交代码$")),
+        page.get_by_role("button", name=re.compile(r"^(提交答案|提交|提交代码|Submit)$", re.I)),
+        page.get_by_role("link", name=re.compile(r"^(提交答案|提交|提交代码|Submit)$", re.I)),
+        page.get_by_text(re.compile(r"^(提交答案|提交|提交代码)$")),
     ]
     for candidate in candidates:
-        if visible(candidate):
-            candidate.first.click()
+        entry = last_visible(candidate)
+        if entry is not None:
+            name = " ".join(entry.inner_text().split())
+            entry.click()
             page.wait_for_timeout(800)
-            return
+            if "#submit" not in page.url:
+                raise MainSiteError("Submission entry did not open the submit area.")
+            return name
     raise MainSiteError("Could not locate the problem submission entry.")
+
+
+def ensure_code_mode(page):
+    tab = page.get_by_text("提交代码", exact=True)
+    if not visible(tab):
+        raise MainSiteError("Code submission mode is unavailable.")
+    tab.first.click()
+    page.wait_for_timeout(500)
+    return True
 
 
 def locate_language(page):
@@ -141,25 +156,47 @@ def locate_language(page):
                       if combos.nth(index).is_visible()]
     if len(visible_combos) == 1:
         return ("combobox", visible_combos[0], labels)
+    current = page.get_by_text(re.compile(r"^C\+\+\d+(?:\s*\([^)]*\))?$", re.I))
+    current_control = last_visible(current)
+    if current_control is not None:
+        return ("custom", current_control, labels)
     raise MainSiteError("Could not locate the language selector.")
+
+
+def cpp17_option(page, language):
+    kind, control, value = language
+    if kind == "select":
+        return True
+    control.click()
+    page.wait_for_timeout(300)
+    option = page.get_by_role("option", name=value)
+    if not visible(option):
+        option = page.get_by_text(re.compile(r"^C\+\+17(?:\s*\([^)]*\))?$", re.I))
+    if not visible(option):
+        page.keyboard.press("Escape")
+        raise MainSiteError("GNU C++17 is not available in the language selector.")
+    return option.first
 
 
 def choose_cpp17(page, language):
     kind, control, value = language
     if kind == "select":
         control.select_option(value=value)
-        return
-    control.click()
-    option = page.get_by_role("option", name=value)
-    if not visible(option):
-        option = page.get_by_text(value)
-    if not visible(option):
-        raise MainSiteError("GNU C++17 is not available in the language selector.")
-    option.first.click()
+    else:
+        try:
+            option = cpp17_option(page, language)
+        except MainSiteError as exc:
+            raise MainSiteError("LANGUAGE_SELECTION_FAILED") from exc
+        option.click()
+    page.wait_for_timeout(300)
+    selected = page.get_by_text(re.compile(r"^C\+\+17(?:\s*\([^)]*\))?$", re.I))
+    if not visible(selected):
+        raise MainSiteError("LANGUAGE_SELECTION_FAILED")
 
 
 def locate_editor(page):
     candidates = [
+        page.locator('[contenteditable="true"][role="textbox"]'),
         page.locator(".monaco-editor textarea"),
         page.locator(".CodeMirror textarea"),
         page.get_by_role("textbox", name=re.compile(r"(代码|code)", re.I)),
@@ -173,30 +210,79 @@ def locate_editor(page):
 
 def locate_final_submit(page):
     candidates = [
-        page.get_by_role("button", name=re.compile(r"^(提交|提交代码|Submit)$", re.I)),
+        page.get_by_role("button", name=re.compile(r"^(提交评测|Submit)$", re.I)),
         page.locator('button[type="submit"]'),
     ]
     for candidate in candidates:
-        match = last_visible(candidate)
-        if match is not None:
-            return match
+        matches = [candidate.nth(index) for index in range(candidate.count())
+                   if candidate.nth(index).is_visible()]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise MainSiteError("Submit button is not uniquely identified.")
     raise MainSiteError("Could not locate the final submit button.")
 
 
-def inspect_submission_form(problem_id, code_path, debug_dir):
+def normalized_code(text):
+    return text.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
+
+
+def editor_text(editor):
+    lines = editor.locator(".cm-line")
+    if lines.count():
+        return "\n".join(lines.nth(index).text_content() or "" for index in range(lines.count()))
+    return editor.inner_text()
+
+
+def fill_editor(editor, code):
+    editor.click()
+    editor.press("Control+A")
+    editor.page.keyboard.insert_text(code)
+    editor.page.wait_for_timeout(300)
+    actual = editor_text(editor)
+    if normalized_code(actual) != normalized_code(code):
+        raise MainSiteError("CODE_EDITOR_FILL_FAILED")
+    return hashlib.sha256(normalized_code(actual).encode("utf-8")).hexdigest()
+
+
+def inspect_submission_form(problem_id, code_path, debug_dir, dry_fill=False):
     require_gui()
     sync_playwright = playwright_api()
     with sync_playwright() as playwright:
         context = open_context(playwright)
         try:
             page = context.pages[0] if context.pages else context.new_page()
-            open_submission_form(page, problem_id)
-            locate_language(page)
-            locate_editor(page)
-            locate_final_submit(page)
-            print(f"[Luogu] Submission form ready for {problem_id}.")
-            print("[Luogu] GNU C++17 selector, code editor, and submit button located.")
-            print("[Luogu] Inspection only; no code was submitted.")
+            if not login_detected(page):
+                page.goto(HOME_URL, wait_until="domcontentloaded", timeout=30000)
+            if not login_detected(page):
+                raise MainSiteError("Luogu login session is not available.")
+            entry_name = open_submission_form(page, problem_id)
+            ensure_code_mode(page)
+            language = locate_language(page)
+            option = cpp17_option(page, language)
+            page.keyboard.press("Escape")
+            editor = locate_editor(page)
+            submit_button = locate_final_submit(page)
+            print("[Luogu] Problem page: OK")
+            print(f"[Luogu] Submission entry: {entry_name}")
+            print("[Luogu] Code submission mode: OK")
+            print("[Luogu] Language control: OK")
+            print("[Luogu] C++17 option: OK")
+            print("[Luogu] CodeMirror 6 editor: OK")
+            print(f"[Luogu] Submit button: {' '.join(submit_button.inner_text().split())}")
+            if dry_fill:
+                page.reload(wait_until="domcontentloaded", timeout=30000)
+                page.wait_for_timeout(500)
+                ensure_code_mode(page)
+                choose_cpp17(page, locate_language(page))
+                editor = locate_editor(page)
+                locate_final_submit(page)
+                code = code_path.read_text(encoding="utf-8")
+                fill_editor(editor, code)
+                print("[Luogu] Dry fill language: C++17")
+                print("[Luogu] Dry fill code verification: PASS")
+            print("[Luogu] Inspection PASS")
+            print("[Luogu] No submission performed.")
         except Exception as exc:
             save_debug(page, debug_dir, "inspect_failed")
             if isinstance(exc, MainSiteError):
@@ -291,16 +377,19 @@ def submit_and_wait(problem_id, code, debug_dir):
         submitted_at = datetime.now().astimezone().isoformat(timespec="seconds")
         try:
             page = context.pages[0] if context.pages else context.new_page()
+            page.goto(HOME_URL, wait_until="domcontentloaded", timeout=30000)
+            if not login_detected(page):
+                raise MainSiteError("Luogu login session is not available.")
             open_submission_form(page, problem_id)
+            ensure_code_mode(page)
+            if not re.search(rf"/problem/{re.escape(problem_id)}(?:$|[?#])", page.url):
+                raise MainSiteError("PROBLEM_ID_MISMATCH")
             previous_ids = record_ids(page)
             language = locate_language(page)
             editor = locate_editor(page)
             submit_button = locate_final_submit(page)
             choose_cpp17(page, language)
-            editor.click()
-            editor.press("Control+A")
-            editor.press("Backspace")
-            editor.insert_text(code)
+            fill_editor(editor, code)
             submit_button.click()
             record_id = wait_for_record(page, previous_ids)
             status, raw_status, score, judge_time = wait_for_result(page, record_id)
@@ -326,8 +415,12 @@ def main():
     modes.add_argument("--check-login", action="store_true")
     modes.add_argument("--inspect", metavar="PROBLEM_ID")
     parser.add_argument("--code", type=Path)
+    parser.add_argument("--dry-fill", action="store_true",
+                        help="select C++17 and verify editor fill without submitting")
     parser.add_argument("--debug-dir", type=Path, default=Path("browser_debug"))
     args = parser.parse_args()
+    if args.dry_fill and not args.inspect:
+        parser.error("--dry-fill requires --inspect")
     try:
         if args.login:
             login()
@@ -336,7 +429,7 @@ def main():
         else:
             if not args.code or not args.code.is_file():
                 parser.error("--inspect requires an existing --code file")
-            inspect_submission_form(args.inspect, args.code, args.debug_dir)
+            inspect_submission_form(args.inspect, args.code, args.debug_dir, args.dry_fill)
     except MainSiteError as exc:
         print(f"[Luogu] {exc}")
         return 1

@@ -82,6 +82,8 @@ python3 agent.py Pxxxx --submit-main
 
 CAPTCHA, when presented, must be completed manually. The browser profile contains an authenticated session and must never be committed. This mode never reads account passwords, exports Cookies, or calls private submission APIs.
 
+The adapter uses the normal Luogu browser submission UI with the persistent authenticated profile and manual CAPTCHA handling. Main-site UI changes may require locator updates. A non-submitting compatibility check is available with `luogu_main.py --inspect Pxxxx --code submission.cpp`; add `--dry-fill` to verify C++17 selection and editor content without clicking the submit button.
+
 可用 `python3 agent.py --inject-ce` 在 v0 注入一个编译错误，真实验证错误反馈与修复闭环；该选项仅用于测试，不改变正常生成逻辑。
 
 未来目标：题目自动获取 → 本地增强测试 → OJ Adapter → 获取真实评测反馈 → 自动修复 → 批量成功率实验。
