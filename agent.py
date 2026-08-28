@@ -435,6 +435,58 @@ def resume_cf_submission(run_dir):
     return return_code
 
 
+def refresh_cf_verdict(run_dir):
+    run_dir = run_dir.resolve()
+    record_path = run_dir / "record.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    oj = record.get("oj", {})
+    submission_id = oj.get("submission_id")
+    if record.get("platform") != "codeforces" or submission_id is None:
+        print("[Refresh] confirmed Codeforces submission_id is required")
+        return 1
+    from codeforces import wait_for_verdict
+    from codeforces_main import configured_handle
+    result = wait_for_verdict(configured_handle(), submission_id)
+    reconciled_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    history = list(oj.get("verdict_history", []))
+    if not history and oj.get("raw_status") is not None:
+        history.append({"status": oj.get("raw_status"),
+                        "observed_at": record.get("finished_at", reconciled_at)})
+    for observation in result.get("verdict_history", []):
+        if not history or history[-1].get("status") != observation.get("status"):
+            history.append(observation)
+    if oj.get("status") == "OJ_UNKNOWN":
+        oj.setdefault("initial_polling_result", {
+            "status": oj.get("status"), "raw_status": oj.get("raw_status"),
+            "recorded_at": record.get("finished_at"),
+        })
+    oj.update(result)
+    oj["verdict_history"] = history
+    oj["reconciled_at"] = reconciled_at
+    record["oj"] = oj
+    record["final_status"] = result["status"]
+    record["failure_reason"] = None if result["status"] != "OJ_UNKNOWN" else "OJ_RESULT_TIMEOUT"
+    matching = next((entry for entry in record.get("oj_history", [])
+                     if entry.get("submission_id") == submission_id), None)
+    if matching:
+        matching.setdefault("initial_status", matching.get("status"))
+        matching["status"] = result["status"]
+        matching["reconciled_at"] = reconciled_at
+    else:
+        record.setdefault("oj_history", []).append({
+            "attempt": len(record.get("oj_history", [])) + 1,
+            "provider": "codeforces-main", "code_version": record.get("final_version"),
+            "status": result["status"], "submission_id": submission_id,
+            "submission_sha256": oj.get("submission_sha256"),
+            "reported_at": reconciled_at, "reconciled_at": reconciled_at,
+        })
+    record["reconciled_at"] = reconciled_at
+    write_json(record_path, record)
+    print(f"[Codeforces] Submission {submission_id}: {result['raw_status']} -> {result['status']}")
+    print(f"[Record] {record_path}")
+    return 0 if result["status"] != "OJ_UNKNOWN" else 1
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("problem_path", nargs="?", type=Path,
@@ -449,6 +501,8 @@ def main():
                         help="submit SAMPLE_AC code through the Luogu browser UI")
     parser.add_argument("--submit-cf", action="store_true",
                         help="submit SAMPLE_AC code through the Codeforces browser UI")
+    parser.add_argument("--refresh-cf-verdict", action="store_true",
+                        help="refresh a confirmed Codeforces submission verdict without submitting")
     parser.add_argument("--resume", type=Path, help="resume an existing run directory")
     parser.add_argument("--oj-result", type=str.upper,
                         choices=("AC", "WA", "TLE", "MLE", "RE", "CE", "PC"))
@@ -461,13 +515,21 @@ def main():
         if (args.problem_path or args.legacy_problem_path or args.submit or args.submit_main
                 or args.inject_ce):
             parser.error("--resume cannot be combined with a problem path or submission/generation options")
+        if args.submit_cf and args.refresh_cf_verdict:
+            parser.error("--submit-cf and --refresh-cf-verdict are mutually exclusive")
+        if args.refresh_cf_verdict:
+            if args.oj_result or args.oj_score is not None or args.oj_record_id:
+                parser.error("--refresh-cf-verdict cannot use manual OJ result options")
+            return refresh_cf_verdict(args.resume)
         if args.submit_cf:
             if args.oj_result or args.oj_score is not None or args.oj_record_id:
                 parser.error("--submit-cf resume cannot use manual OJ result options")
             return resume_cf_submission(args.resume)
         if not args.oj_result:
-            parser.error("--resume requires --oj-result or --submit-cf")
+            parser.error("--resume requires --oj-result, --submit-cf, or --refresh-cf-verdict")
         return resume_run(args.resume, args.oj_result, args.oj_score, args.oj_record_id)
+    if args.refresh_cf_verdict:
+        parser.error("--refresh-cf-verdict requires --resume")
     if args.oj_result or args.oj_score is not None or args.oj_record_id:
         parser.error("OJ feedback options require --resume")
     if sum((args.submit, args.submit_main, args.submit_cf)) > 1:

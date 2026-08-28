@@ -6,6 +6,7 @@ import fcntl
 import json
 import re
 import time
+from datetime import datetime
 from pathlib import Path
 
 import requests
@@ -18,6 +19,16 @@ API_LOCK = Path.home() / ".cache" / "LocalJudgeAgent" / "codeforces-api.lock"
 VERDICT_POLL_SEC = 2.5
 SUBMISSION_FIND_TIMEOUT_SEC = 30
 VERDICT_TIMEOUT_SEC = 180
+CF_PENDING_VERDICTS = {None, "", "SUBMITTED", "TESTING"}
+CF_TERMINAL_VERDICTS = {
+    "OK": "OJ_AC", "WRONG_ANSWER": "OJ_WA",
+    "TIME_LIMIT_EXCEEDED": "OJ_TLE", "MEMORY_LIMIT_EXCEEDED": "OJ_MLE",
+    "RUNTIME_ERROR": "OJ_RE", "COMPILATION_ERROR": "OJ_CE",
+    "IDLENESS_LIMIT_EXCEEDED": "OJ_IDLE", "PARTIAL": "OJ_PC",
+    "CHALLENGED": "OJ_FAILED", "SKIPPED": "OJ_SKIPPED",
+    "REJECTED": "OJ_REJECTED", "FAILED": "OJ_FAILED", "CRASHED": "OJ_FAILED",
+    "INPUT_PREPARATION_CRASHED": "OJ_FAILED", "SECURITY_VIOLATED": "OJ_FAILED",
+}
 
 
 class CodeforcesError(Exception):
@@ -142,12 +153,7 @@ def find_submission(submissions, before_id, contest_id, index):
 
 
 def normalize_verdict(verdict):
-    return {
-        "OK": "OJ_AC", "WRONG_ANSWER": "OJ_WA",
-        "TIME_LIMIT_EXCEEDED": "OJ_TLE", "MEMORY_LIMIT_EXCEEDED": "OJ_MLE",
-        "RUNTIME_ERROR": "OJ_RE", "COMPILATION_ERROR": "OJ_CE",
-        "IDLENESS_LIMIT_EXCEEDED": "OJ_IDLE", "CHALLENGED": "OJ_FAILED",
-    }.get(verdict, "OJ_UNKNOWN")
+    return CF_TERMINAL_VERDICTS.get(verdict, "OJ_UNKNOWN")
 
 
 def wait_for_submission(handle, before_id, contest_id, index):
@@ -163,19 +169,30 @@ def wait_for_submission(handle, before_id, contest_id, index):
 def wait_for_verdict(handle, submission_id):
     started = time.perf_counter()
     deadline = time.monotonic() + VERDICT_TIMEOUT_SEC
+    history = []
+    unseen = object()
+    last_verdict = unseen
     while time.monotonic() < deadline:
         submissions = get_user_submissions(handle)
         submission = next((item for item in submissions if item.get("id") == submission_id), None)
-        if submission and submission.get("verdict"):
-            verdict = submission["verdict"]
-            return {"submission_id": submission["id"], "status": normalize_verdict(verdict),
-                    "raw_status": verdict, "raw_verdict": verdict,
-                    "timeConsumedMillis": submission.get("timeConsumedMillis"),
-                    "memoryConsumedBytes": submission.get("memoryConsumedBytes"),
-                    "judge_time_sec": round(time.perf_counter() - started, 6)}
-        time.sleep(VERDICT_POLL_SEC)
+        verdict = submission.get("verdict") if submission else None
+        if verdict != last_verdict:
+            history.append({"status": verdict,
+                            "observed_at": datetime.now().astimezone().isoformat(timespec="seconds")})
+            last_verdict = verdict
+        if not submission or verdict in CF_PENDING_VERDICTS or verdict not in CF_TERMINAL_VERDICTS:
+            time.sleep(VERDICT_POLL_SEC)
+            continue
+        return {"submission_id": submission["id"], "status": normalize_verdict(verdict),
+                "raw_status": verdict, "raw_verdict": verdict,
+                "timeConsumedMillis": submission.get("timeConsumedMillis"),
+                "memoryConsumedBytes": submission.get("memoryConsumedBytes"),
+                "verdict_history": history,
+                "judge_time_sec": round(time.perf_counter() - started, 6)}
+    raw_verdict = None if last_verdict is unseen else last_verdict
     return {"submission_id": submission_id, "status": "OJ_UNKNOWN",
-            "raw_status": "OJ_RESULT_TIMEOUT", "raw_verdict": None,
+            "raw_status": raw_verdict, "raw_verdict": raw_verdict,
+            "timeout_reason": "OJ_RESULT_TIMEOUT", "verdict_history": history,
             "judge_time_sec": round(time.perf_counter() - started, 6)}
 
 
