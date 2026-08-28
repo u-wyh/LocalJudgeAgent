@@ -9,3 +9,6 @@ problems/P*.json
 .env.*
 credentials*
 secrets*
+browser_debug/
+.playwright/
+*.png

@@ -374,6 +374,8 @@ def main():
                         help="test repair by replacing v0 with a deliberate compile error")
     parser.add_argument("--submit", action="store_true",
                         help="submit SAMPLE_AC code to the Luogu Open Platform")
+    parser.add_argument("--submit-main", action="store_true",
+                        help="submit SAMPLE_AC code through the Luogu browser UI")
     parser.add_argument("--resume", type=Path, help="resume an existing run directory")
     parser.add_argument("--oj-result", type=str.upper,
                         choices=("AC", "WA", "TLE", "MLE", "RE", "CE", "PC"))
@@ -383,13 +385,23 @@ def main():
     if args.problem_path and args.legacy_problem_path:
         parser.error("provide the problem path either positionally or with --problem, not both")
     if args.resume:
-        if args.problem_path or args.legacy_problem_path or args.submit or args.inject_ce:
-            parser.error("--resume cannot be combined with a problem path, --submit, or --inject-ce")
+        if args.problem_path or args.legacy_problem_path or args.submit or args.submit_main or args.inject_ce:
+            parser.error("--resume cannot be combined with a problem path or submission/generation options")
         if not args.oj_result:
             parser.error("--resume requires --oj-result")
         return resume_run(args.resume, args.oj_result, args.oj_score, args.oj_record_id)
     if args.oj_result or args.oj_score is not None or args.oj_record_id:
         parser.error("OJ feedback options require --resume")
+    if args.submit and args.submit_main:
+        parser.error("--submit and --submit-main are mutually exclusive")
+    if args.submit_main:
+        from luogu_main import MainSiteError, playwright_api, require_gui
+        try:
+            require_gui()
+            playwright_api()
+        except MainSiteError as exc:
+            print(f"[Luogu] {exc}")
+            return 1
     if args.submit:
         try:
             get_auth()
@@ -478,22 +490,40 @@ def main():
         if not record["final_sample_passed"]:
             record["failure_reason"] = last_reason
             print(f"[Result] FAIL ({last_reason})")
-        elif args.submit:
-            final_code = (run_dir / f"main_{record['final_version']}.cpp").read_text(encoding="utf-8")
-            try:
-                record["oj"] = judge(problem["problem_id"], final_code)
-                print(f"[OJ] {record['oj']['status']}")
-                record["oj_history"].append({
-                    "attempt": 1, "code_version": record["final_version"],
-                    "status": record["oj"]["status"], "score": record["oj"].get("score"),
-                    "record_id": record["oj"].get("request_id"),
-                    "reported_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-                })
-            except (requests.RequestException, OpenJudgeError) as exc:
-                record["oj"].update({"status": "OJ_UNKNOWN", "raw_status": type(exc).__name__})
-                print(f"[OJ] FAILED: {exc}")
-        if record["final_sample_passed"]:
-            prepare_submission(run_dir, record)
+        elif record["final_sample_passed"]:
+            submission = prepare_submission(run_dir, record)
+            final_code = submission.read_text(encoding="utf-8")
+            if args.submit:
+                try:
+                    record["oj"] = judge(problem["problem_id"], final_code)
+                    print(f"[OJ] {record['oj']['status']}")
+                    record["oj_history"].append({
+                        "attempt": 1, "code_version": record["final_version"],
+                        "status": record["oj"]["status"], "score": record["oj"].get("score"),
+                        "record_id": record["oj"].get("request_id"),
+                        "reported_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                    })
+                except (requests.RequestException, OpenJudgeError) as exc:
+                    record["oj"].update({"status": "OJ_UNKNOWN", "raw_status": type(exc).__name__})
+                    print(f"[OJ] FAILED: {exc}")
+            elif args.submit_main:
+                from luogu_main import MainSiteError, submit_and_wait
+                try:
+                    record["oj"] = submit_and_wait(
+                        problem["problem_id"], final_code, run_dir / "browser_debug")
+                    print(f"[OJ] {record['oj']['status']}")
+                    record["oj_history"].append({
+                        "attempt": 1, "provider": "luogu-main",
+                        "code_version": record["final_version"],
+                        "status": record["oj"]["status"], "score": record["oj"].get("score"),
+                        "record_id": record["oj"].get("record_id"),
+                        "submission_sha256": record["oj"]["submission_sha256"],
+                        "reported_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                    })
+                except MainSiteError as exc:
+                    record["oj"].update({"provider": "luogu-main", "submitted": False,
+                                         "status": "OJ_UNKNOWN", "raw_status": str(exc)})
+                    print(f"[OJ] FAILED: {exc}")
     except (requests.RequestException, KeyError, TypeError, json.JSONDecodeError) as exc:
         record["failure_reason"] = "MODEL_ERROR"
         (run_dir / "error.txt").write_text(repr(exc) + "\n", encoding="utf-8")

@@ -63,7 +63,24 @@ After a failed real result, GPT-OSS repairs the code and locally verifies it bef
 python3 agent.py --resume runs/P1090_xxx --oj-result AC --oj-score 100
 ```
 
-Only `AC`, `WA`, `TLE`, `MLE`, `RE`, `CE`, and `PC` are accepted. The user remains responsible for browser submission; no account, Cookie, CAPTCHA, or main-site submission automation is used.
+Only `AC`, `WA`, `TLE`, `MLE`, `RE`, `CE`, and `PC` are accepted. In this manual workflow, the user remains responsible for browser submission; no account, Cookie, or CAPTCHA automation is used.
+
+## Luogu main-site browser mode
+
+This optional mode requires Playwright with Chromium and an active desktop `DISPLAY` or `WAYLAND_DISPLAY`. It uses a headed browser and a persistent profile under `~/.local/share/LocalJudgeAgent/luogu-profile/`. Complete the first login yourself in the browser:
+
+```bash
+python3 luogu_main.py --login
+python3 luogu_main.py --check-login
+```
+
+Then a new problem can be solved and submitted through the normal browser UI:
+
+```bash
+python3 agent.py Pxxxx --submit-main
+```
+
+CAPTCHA, when presented, must be completed manually. The browser profile contains an authenticated session and must never be committed. This mode never reads account passwords, exports Cookies, or calls private submission APIs.
 
 可用 `python3 agent.py --inject-ce` 在 v0 注入一个编译错误，真实验证错误反馈与修复闭环；该选项仅用于测试，不改变正常生成逻辑。
 
