@@ -20,19 +20,34 @@ def load_records():
     return records
 
 
+def oj_statuses(record):
+    history = record.get("oj_history") or []
+    if history:
+        return [entry.get("status", "OJ_UNKNOWN") for entry in history]
+    status = record.get("oj", {}).get("status")
+    return [status] if status else []
+
+
 def main():
     records = load_records()
-    headers = ("Problem", "Difficulty", "FirstPass", "Repairs", "Result", "TotalTime")
+    headers = ("Problem", "Difficulty", "FirstPass", "Repairs", "Sample", "OJ",
+               "OJAttempts", "OJRepairs", "TotalTime")
     rows = []
     for record in records:
         passed = bool(record.get("final_sample_passed", False))
-        status = record.get("final_status") or ("SAMPLE_AC" if passed else "FAILED")
+        sample_status = "SAMPLE_AC" if passed else "FAILED"
+        statuses = oj_statuses(record)
+        oj = statuses[-1] if statuses else "-"
+        oj_attempts = len(statuses)
         rows.append((
             str(record.get("problem_id", "?")),
             str(record.get("difficulty", "")),
             "YES" if record.get("first_generation_success", False) else "NO",
             str(record.get("repair_attempts", 0)),
-            status,
+            sample_status,
+            oj,
+            str(oj_attempts),
+            str(record.get("oj_repair_attempts", 0)),
             f"{float(record.get('total_time_sec', 0)):.1f}s",
         ))
     widths = [max(len(headers[i]), *(len(row[i]) for row in rows)) for i in range(len(headers))]
@@ -46,6 +61,11 @@ def main():
     avg_repairs = sum(float(record.get("repair_attempts", 0)) for record in records) / count if count else 0
     avg_total = sum(float(record.get("total_time_sec", 0)) for record in records) / count if count else 0
     avg_model = sum(float(record.get("model_time_sec", 0)) for record in records) / count if count else 0
+    evaluated = [record for record in records if oj_statuses(record)]
+    first_oj_ac = sum(oj_statuses(record)[0] == "OJ_AC" for record in evaluated)
+    final_oj_ac = sum(oj_statuses(record)[-1] == "OJ_AC" for record in evaluated)
+    avg_oj_attempts = sum(len(oj_statuses(record)) for record in evaluated) / len(evaluated) if evaluated else 0
+    avg_oj_repairs = sum(record.get("oj_repair_attempts", 0) for record in evaluated) / len(evaluated) if evaluated else 0
     print()
     print(f"Total problems: {count}")
     print(f"First-generation success: {first_pass}/{count}")
@@ -53,6 +73,11 @@ def main():
     print(f"Average repairs: {avg_repairs:.2f}")
     print(f"Average total time: {avg_total:.1f}s")
     print(f"Average model time: {avg_model:.1f}s")
+    print(f"OJ evaluated problems: {len(evaluated)}")
+    print(f"First OJ AC: {first_oj_ac}/{len(evaluated)}")
+    print(f"Final OJ AC: {final_oj_ac}/{len(evaluated)}")
+    print(f"Average OJ attempts: {avg_oj_attempts:.2f}")
+    print(f"Average OJ repairs: {avg_oj_repairs:.2f}")
 
 
 if __name__ == "__main__":

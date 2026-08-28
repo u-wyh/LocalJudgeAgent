@@ -22,6 +22,7 @@ NUM_CTX = 32768
 MODEL_TIMEOUT_SEC = 900
 RUN_TIMEOUT_SEC = 5
 MAX_REPAIRS = 3
+MAX_OJ_REPAIRS = 3
 ROOT = Path(__file__).resolve().parent
 
 
@@ -179,6 +180,190 @@ def write_json(path, value):
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def oj_repair_prompt(problem, code, result, score):
+    focus = {
+        "WA": "Check algorithm correctness, boundary cases, overflow, and whether the statement was misread.",
+        "TLE": "Check time complexity, algorithmic bottlenecks, and the worst-case constraints.",
+        "MLE": "Check memory complexity and large arrays or data structures.",
+        "RE": "Check array bounds, division by zero, stack overflow, and invalid memory access.",
+        "CE": "Check strict GNU C++17 portability and differences between local and OJ compilation.",
+        "PC": "Only partial credit was received. Recheck the full constraints and all subtasks.",
+    }[result]
+    score_text = f"\nScore: {score:g}" if score is not None else ""
+    return f"""The program passed all provided samples, but failed the real online judge.
+
+{format_problem(problem)}
+
+Online Judge result: {result}{score_text}
+
+The hidden failing test case is unavailable.
+Re-analyze the algorithm from the complete problem statement and constraints.
+Do not guess a hidden testcase.
+{focus}
+
+Current submitted code:
+```cpp
+{code}
+```
+
+Return a complete corrected GNU C++17 program, not a patch.
+Your final response must contain exactly one ```cpp code block and no explanation outside it.
+"""
+
+
+def next_version(record):
+    numbers = [int(label[1:]) for label in record.get("code_versions", [])
+               if re.fullmatch(r"v\d+", str(label))]
+    return max(numbers, default=-1) + 1
+
+
+def load_resume_problem(run_dir, record):
+    candidates = [run_dir / "problem.json", ROOT / "problems" / f"{record['problem_id']}.json"]
+    if record.get("problem_id") == "P1001":
+        candidates.append(ROOT / "problem.json")
+    for path in candidates:
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    raise FileNotFoundError(f"No local problem data found for {record['problem_id']}")
+
+
+def prepare_submission(run_dir, record):
+    version = record.get("final_version")
+    source = run_dir / f"main_{version}.cpp"
+    if not version or not source.exists():
+        raise FileNotFoundError("final code version is missing")
+    destination = run_dir / "submission.cpp"
+    destination.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    try:
+        shown = destination.relative_to(ROOT)
+    except ValueError:
+        shown = destination
+    print(f"[Submit] Code ready: {shown}")
+    return destination
+
+
+def manual_oj_entry(record, result, score, record_id):
+    return {
+        "attempt": len(record.get("oj_history", [])) + 1,
+        "code_version": record.get("final_version"),
+        "status": f"OJ_{result}",
+        "score": score,
+        "record_id": record_id,
+        "reported_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+
+
+def resume_run(run_dir, oj_result, oj_score=None, oj_record_id=None):
+    started = time.perf_counter()
+    run_dir = run_dir.resolve()
+    record_path = run_dir / "record.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    problem = load_resume_problem(run_dir, record)
+    record.setdefault("oj_history", [])
+    record.setdefault("oj_repair_attempts", 0)
+    record.setdefault("oj", {"provider": "luogu-manual", "submitted": False})
+    if record.get("final_status") == "OJ_AC":
+        print("[Result] OJ_AC (already finalized)")
+        return 0
+    if not record.get("final_sample_passed"):
+        print("[Resume] code is not prepared for submission")
+        return 1
+    submission = run_dir / "submission.cpp"
+    if not submission.exists():
+        submission = prepare_submission(run_dir, record)
+    code = submission.read_text(encoding="utf-8")
+
+    entry = manual_oj_entry(record, oj_result, oj_score, oj_record_id)
+    record["oj_history"].append(entry)
+    record["oj"] = {"provider": "luogu-manual", "submitted": True,
+                    "status": entry["status"], "raw_status": oj_result,
+                    "score": oj_score, "record_id": oj_record_id}
+    print(f"[OJ] {oj_result}")
+    if oj_result == "AC":
+        record["final_status"] = "OJ_AC"
+        record["total_time_sec"] = round(record.get("total_time_sec", 0) + time.perf_counter() - started, 6)
+        record["finished_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+        write_json(record_path, record)
+        print("[Result] OJ_AC")
+        print(f"[Record] {record_path}")
+        return 0
+
+    if record["oj_repair_attempts"] >= MAX_OJ_REPAIRS:
+        record["final_status"] = entry["status"]
+        record["finished_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+        write_json(record_path, record)
+        print("[OJ Repair] maximum attempts reached")
+        return 1
+
+    record["oj_repair_attempts"] += 1
+    record["final_sample_passed"] = False
+    prompt = oj_repair_prompt(problem, code, oj_result, oj_score)
+    version = next_version(record)
+    last_reason = None
+    try:
+        for local_repair in range(MAX_REPAIRS + 1):
+            label = f"v{version}"
+            (run_dir / f"prompt_{version}.txt").write_text(prompt, encoding="utf-8")
+            response, model_time = call_model(prompt)
+            record["model_time_sec"] = record.get("model_time_sec", 0) + model_time
+            print(f"[Model] {model_time:.2f}s")
+            (run_dir / f"response_{version}.txt").write_text(response, encoding="utf-8")
+            code = extract_code(response)
+            version_path = run_dir / f"main_{label}.cpp"
+            version_path.write_text(code, encoding="utf-8")
+            (ROOT / "main.cpp").write_text(code, encoding="utf-8")
+            record.setdefault("code_versions", []).append(label)
+            compile_result = compile_code(ROOT / "main.cpp", run_dir / "main")
+            record["compile_attempts"] = record.get("compile_attempts", 0) + 1
+            record["compile_time_sec"] = record.get("compile_time_sec", 0) + compile_result["time_sec"]
+            write_json(run_dir / f"compile_{version}.txt", compile_result)
+            if compile_result["return_code"] != 0:
+                print("[Compile] FAIL")
+                sample_results = []
+            else:
+                print("[Compile] PASS")
+                sample_results = run_samples(run_dir / "main", problem["samples"])
+                record["run_time_sec"] = record.get("run_time_sec", 0) + sum(
+                    item["time_sec"] for item in sample_results)
+                write_json(run_dir / f"samples_{version}.json", sample_results)
+                if all(item["verdict"] == "PASS" for item in sample_results):
+                    record["final_sample_passed"] = True
+                    record["final_version"] = label
+                    record["failure_reason"] = None
+                    record["final_status"] = "PREPARED_FOR_SUBMISSION"
+                    prepare_submission(run_dir, record)
+                    print(f"[OJ Repair] {label} ready for manual submission")
+                    return_code = 0
+                    break
+            failure, last_reason = failure_feedback(problem, compile_result, sample_results)
+            if local_repair == MAX_REPAIRS:
+                record["failure_reason"] = "MAX_REPAIRS_EXCEEDED"
+                record["final_status"] = "FAILED"
+                return_code = 1
+                break
+            record["repair_attempts"] = record.get("repair_attempts", 0) + 1
+            prompt = repair_prompt(problem, code, failure, local_repair + 1)
+            version += 1
+    except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+        record["failure_reason"] = "MODEL_ERROR" if isinstance(exc, requests.RequestException) else "CODE_EXTRACTION_ERROR"
+        record["final_status"] = "FAILED"
+        (run_dir / "error.txt").write_text(repr(exc) + "\n", encoding="utf-8")
+        return_code = 1
+    except Exception as exc:
+        record["failure_reason"] = "LOCAL_VALIDATION_ERROR"
+        record["final_status"] = "FAILED"
+        (run_dir / "error.txt").write_text(repr(exc) + "\n", encoding="utf-8")
+        return_code = 1
+    finally:
+        record["total_time_sec"] = record.get("total_time_sec", 0) + time.perf_counter() - started
+        record["finished_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+        for key in ("total_time_sec", "model_time_sec", "compile_time_sec", "run_time_sec"):
+            record[key] = round(record.get(key, 0), 6)
+        write_json(record_path, record)
+        print(f"[Record] {record_path}")
+    return return_code
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("problem_path", nargs="?", type=Path,
@@ -189,9 +374,22 @@ def main():
                         help="test repair by replacing v0 with a deliberate compile error")
     parser.add_argument("--submit", action="store_true",
                         help="submit SAMPLE_AC code to the Luogu Open Platform")
+    parser.add_argument("--resume", type=Path, help="resume an existing run directory")
+    parser.add_argument("--oj-result", type=str.upper,
+                        choices=("AC", "WA", "TLE", "MLE", "RE", "CE", "PC"))
+    parser.add_argument("--oj-score", type=float)
+    parser.add_argument("--oj-record-id")
     args = parser.parse_args()
     if args.problem_path and args.legacy_problem_path:
         parser.error("provide the problem path either positionally or with --problem, not both")
+    if args.resume:
+        if args.problem_path or args.legacy_problem_path or args.submit or args.inject_ce:
+            parser.error("--resume cannot be combined with a problem path, --submit, or --inject-ce")
+        if not args.oj_result:
+            parser.error("--resume requires --oj-result")
+        return resume_run(args.resume, args.oj_result, args.oj_score, args.oj_record_id)
+    if args.oj_result or args.oj_score is not None or args.oj_record_id:
+        parser.error("OJ feedback options require --resume")
     if args.submit:
         try:
             get_auth()
@@ -213,6 +411,7 @@ def main():
         print(f"[Problem] {exc.code}: {exc}")
         return 1
     run_dir = unique_run_dir(problem["problem_id"])
+    write_json(run_dir / "problem.json", problem)
     record = {
         "problem_id": problem["problem_id"], "title": problem["title"],
         "difficulty": problem.get("difficulty", ""), "model": MODEL, "context": NUM_CTX,
@@ -222,6 +421,7 @@ def main():
         "final_version": None, "failure_reason": None,
         "started_at": started_at, "finished_at": None, "final_status": "FAILED",
         "oj": {"provider": "luogu-open", "submitted": False},
+        "oj_repair_attempts": 0, "oj_history": [],
     }
     print(f"[Problem] {problem['problem_id']} {problem['title']}")
     print(f"[Model] {MODEL}")
@@ -283,9 +483,17 @@ def main():
             try:
                 record["oj"] = judge(problem["problem_id"], final_code)
                 print(f"[OJ] {record['oj']['status']}")
+                record["oj_history"].append({
+                    "attempt": 1, "code_version": record["final_version"],
+                    "status": record["oj"]["status"], "score": record["oj"].get("score"),
+                    "record_id": record["oj"].get("request_id"),
+                    "reported_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                })
             except (requests.RequestException, OpenJudgeError) as exc:
                 record["oj"].update({"status": "OJ_UNKNOWN", "raw_status": type(exc).__name__})
                 print(f"[OJ] FAILED: {exc}")
+        if record["final_sample_passed"]:
+            prepare_submission(run_dir, record)
     except (requests.RequestException, KeyError, TypeError, json.JSONDecodeError) as exc:
         record["failure_reason"] = "MODEL_ERROR"
         (run_dir / "error.txt").write_text(repr(exc) + "\n", encoding="utf-8")
@@ -297,7 +505,13 @@ def main():
     finally:
         record["total_time_sec"] = time.perf_counter() - started
         record["finished_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
-        record["final_status"] = "SAMPLE_AC" if record["final_sample_passed"] else "FAILED"
+        oj_status = record.get("oj", {}).get("status")
+        if record["oj"].get("submitted") and oj_status:
+            record["final_status"] = oj_status
+        elif record["final_sample_passed"]:
+            record["final_status"] = "PREPARED_FOR_SUBMISSION"
+        else:
+            record["final_status"] = "FAILED"
         for key in ("total_time_sec", "model_time_sec", "compile_time_sec", "run_time_sec"):
             record[key] = round(record[key], 6)
         write_json(run_dir / "record.json", record)

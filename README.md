@@ -48,6 +48,23 @@ python3 agent.py P1001 --submit
 
 The token must never be committed to Git. Online judging uses GNU C++17 (`cxx/17/gcc`) and does not fall back to automated submission on the main Luogu website. `SAMPLE_AC != OJ_AC`.
 
+### Manual OJ Feedback
+
+Without an Open Platform token, run normally and manually submit the generated `submission.cpp`:
+
+```bash
+python3 agent.py P1090
+python3 agent.py --resume runs/P1090_xxx --oj-result WA --oj-score 0 --oj-record-id 123456789
+```
+
+After a failed real result, GPT-OSS repairs the code and locally verifies it before replacing `submission.cpp`. Report final acceptance without another model call:
+
+```bash
+python3 agent.py --resume runs/P1090_xxx --oj-result AC --oj-score 100
+```
+
+Only `AC`, `WA`, `TLE`, `MLE`, `RE`, `CE`, and `PC` are accepted. The user remains responsible for browser submission; no account, Cookie, CAPTCHA, or main-site submission automation is used.
+
 可用 `python3 agent.py --inject-ce` 在 v0 注入一个编译错误，真实验证错误反馈与修复闭环；该选项仅用于测试，不改变正常生成逻辑。
 
 未来目标：题目自动获取 → 本地增强测试 → OJ Adapter → 获取真实评测反馈 → 自动修复 → 批量成功率实验。
