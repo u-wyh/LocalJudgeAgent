@@ -178,12 +178,19 @@ def write_json(path, value):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--problem", type=Path, default=ROOT / "problem.json")
+    parser.add_argument("problem_path", nargs="?", type=Path,
+                        help="problem JSON path (default: problem.json)")
+    parser.add_argument("--problem", dest="legacy_problem_path", type=Path,
+                        help=argparse.SUPPRESS)
     parser.add_argument("--inject-ce", action="store_true",
                         help="test repair by replacing v0 with a deliberate compile error")
     args = parser.parse_args()
+    if args.problem_path and args.legacy_problem_path:
+        parser.error("provide the problem path either positionally or with --problem, not both")
+    problem_path = args.problem_path or args.legacy_problem_path or ROOT / "problem.json"
     started = time.perf_counter()
-    problem = json.loads(args.problem.read_text(encoding="utf-8"))
+    started_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    problem = json.loads(problem_path.read_text(encoding="utf-8"))
     run_dir = unique_run_dir(problem["problem_id"])
     record = {
         "problem_id": problem["problem_id"], "title": problem["title"],
@@ -192,6 +199,7 @@ def main():
         "final_sample_passed": False, "total_time_sec": 0, "model_time_sec": 0,
         "compile_time_sec": 0, "run_time_sec": 0, "code_versions": [],
         "final_version": None, "failure_reason": None,
+        "started_at": started_at, "finished_at": None, "final_status": "FAILED",
     }
     print(f"[Problem] {problem['problem_id']} {problem['title']}")
     print(f"[Model] {MODEL}")
@@ -258,6 +266,8 @@ def main():
         print(f"[Result] ERROR: {exc}")
     finally:
         record["total_time_sec"] = time.perf_counter() - started
+        record["finished_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+        record["final_status"] = "SAMPLE_AC" if record["final_sample_passed"] else "FAILED"
         for key in ("total_time_sec", "model_time_sec", "compile_time_sec", "run_time_sec"):
             record[key] = round(record[key], 6)
         write_json(run_dir / "record.json", record)
