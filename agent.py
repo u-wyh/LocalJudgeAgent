@@ -40,10 +40,12 @@ def format_problem(problem):
             f"Sample {index} input:\n{sample['input']}\n"
             f"Sample {index} output:\n{sample['output']}"
         )
+    difficulty = ("" if problem.get("platform") == "codeforces"
+                  else f"Difficulty: {problem.get('difficulty', '')}\n")
     return (
         f"Problem ID: {problem['problem_id']}\n"
         f"Title: {problem['title']}\n"
-        f"Difficulty: {problem.get('difficulty', '')}\n\n"
+        f"{difficulty}\n"
         f"Full statement:\n{problem['statement']}\n\n" + "\n\n".join(samples)
     )
 

@@ -1,0 +1,35 @@
+{
+  "name": "cf_stage1_800_1200",
+  "platform": "codeforces",
+  "problems": [
+    {"id": "CF231A", "expected_rating": 800},
+    {"id": "CF282A", "expected_rating": 800},
+    {"id": "CF50A", "expected_rating": 800},
+    {"id": "CF263A", "expected_rating": 800},
+    {"id": "CF339A", "expected_rating": 800},
+
+    {"id": "CF133A", "expected_rating": 900},
+    {"id": "CF580A", "expected_rating": 900},
+    {"id": "CF208A", "expected_rating": 900},
+    {"id": "CF337A", "expected_rating": 900},
+    {"id": "CF1475A", "expected_rating": 900},
+
+    {"id": "CF1A", "expected_rating": 1000},
+    {"id": "CF69A", "expected_rating": 1000},
+    {"id": "CF58A", "expected_rating": 1000},
+    {"id": "CF230A", "expected_rating": 1000},
+    {"id": "CF500A", "expected_rating": 1000},
+
+    {"id": "CF706B", "expected_rating": 1100},
+    {"id": "CF363B", "expected_rating": 1100},
+    {"id": "CF456A", "expected_rating": 1100},
+    {"id": "CF313B", "expected_rating": 1100},
+    {"id": "CF368B", "expected_rating": 1100},
+
+    {"id": "CF492B", "expected_rating": 1200},
+    {"id": "CF514A", "expected_rating": 1200},
+    {"id": "CF1352C", "expected_rating": 1200},
+    {"id": "CF474B", "expected_rating": 1200},
+    {"id": "CF433B", "expected_rating": 1200}
+  ]
+}

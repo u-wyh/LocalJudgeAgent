@@ -97,6 +97,18 @@ python3 agent.py --resume runs/CF4A_xxx --refresh-cf-verdict
 
 The official Codeforces API supplies metadata and verdicts; the normal headed browser UI is used for submission with a separate persistent profile. The browser adapter connects to the existing direct-network Chromium CDP endpoint at `http://127.0.0.1:9222`; it does not launch another browser. Codeforces anti-bot verification rejects automated final submission, so LocalJudgeAgent prepares and verifies the official form while the user performs the final Submit/verification step. The agent then finds a newer matching problem submission through `user.status`, verifies its displayed source (including Codeforces blank-line `U+00A0` normalization), and waits for a known terminal verdict; `SUBMITTED`, `TESTING`, null, and unknown future states continue polling. `oj.submitted` is true only after the new ID and source are confirmed. The submission resume form verifies the saved SHA-256 and never calls the model. The verdict-refresh form only reconciles an already confirmed submission ID and never opens a submission page. Active contests and virtual participation are explicitly unsupported. Use `codeforces_main.py --login`, `--check-login`, and `--inspect 4A --code submission.cpp [--dry-fill]` to prepare the browser adapter without submitting.
 
+## Batch benchmark
+
+Run a benchmark sequentially with the existing solver and local sample judge. Batch mode never enables any online-judge submission option, and Codeforces rating/tags are retained only in records rather than exposed to the model prompt.
+
+```bash
+python3 batch.py benchmarks/cf_stage1.json --dry-run
+python3 batch.py benchmarks/cf_stage1.json
+python3 batch.py benchmarks/cf_stage1.json --resume batch_runs/cf_stage1_800_1200_xxx
+```
+
+`batch_record.json` is atomically checkpointed after every problem. Completed `SAMPLE_AC` and `FAILED` entries are skipped on resume; an interrupted active problem is rerun. Use `--limit 1` for a single-problem workflow test. Detailed model artifacts remain in `runs/`, while `batch_runs/` stores only the batch record, summary, and logs.
+
 可用 `python3 agent.py --inject-ce` 在 v0 注入一个编译错误，真实验证错误反馈与修复闭环；该选项仅用于测试，不改变正常生成逻辑。
 
 未来目标：题目自动获取 → 本地增强测试 → OJ Adapter → 获取真实评测反馈 → 自动修复 → 批量成功率实验。

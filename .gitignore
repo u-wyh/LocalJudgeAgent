@@ -14,3 +14,4 @@ browser_debug/
 *.png
 problems/codeforces/
 codeforces_main.py.bak-before-cdp
+batch_runs/

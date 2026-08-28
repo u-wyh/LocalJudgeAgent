@@ -123,7 +123,6 @@ def check_login():
 
 
 def fetch_problem_statement_data(contest_id, index):
-    require_gui()
     url = f"https://codeforces.com/problemset/problem/{contest_id}/{index}"
     with playwright_api()() as playwright:
         context = open_context(playwright)
