@@ -109,6 +109,16 @@ python3 batch.py benchmarks/cf_stage1.json --resume batch_runs/cf_stage1_800_120
 
 `batch_record.json` is atomically checkpointed after every problem. Completed `SAMPLE_AC` and `FAILED` entries are skipped on resume; an interrupted active problem is rerun. Use `--limit 1` for a single-problem workflow test. Detailed model artifacts remain in `runs/`, while `batch_runs/` stores only the batch record, summary, and logs.
 
+For a real Luogu benchmark, reuse the persistent headed-browser login:
+
+```bash
+export DISPLAY=:0
+export XAUTHORITY=/home/wyh/.Xauthority
+python3 batch.py benchmarks/luogu_stage1_real.json --real-oj
+```
+
+Without `--real-oj`, the Luogu list remains sample-only. Real-OJ mode permits the initial submission plus at most three OJ repairs. CAPTCHA is never solved or waited on: the problem becomes `CAPTCHA_SKIPPED` and the batch continues. A lost login pauses as `BATCH_PAUSED_LOGIN_REQUIRED`; log in again and resume with both `--real-oj` and `--resume batch_runs/<run>`.
+
 可用 `python3 agent.py --inject-ce` 在 v0 注入一个编译错误，真实验证错误反馈与修复闭环；该选项仅用于测试，不改变正常生成逻辑。
 
 未来目标：题目自动获取 → 本地增强测试 → OJ Adapter → 获取真实评测反馈 → 自动修复 → 批量成功率实验。

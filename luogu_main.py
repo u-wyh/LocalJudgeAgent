@@ -20,6 +20,14 @@ class MainSiteError(Exception):
     pass
 
 
+class LuoguCaptchaRequired(MainSiteError):
+    pass
+
+
+class LuoguLoginRequired(MainSiteError):
+    pass
+
+
 def require_gui():
     if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
         raise MainSiteError("GUI session unavailable")
@@ -311,12 +319,14 @@ def captcha_visible(page):
     return visible(text) or frames.count() > 0
 
 
-def wait_for_record(page, previous_ids):
+def wait_for_record(page, previous_ids, skip_captcha=False):
     deadline = time.monotonic() + 60
     prompted = False
     while time.monotonic() < deadline:
         if captcha_visible(page) and not prompted:
             print("[Luogu] CAPTCHA requires manual completion.")
+            if skip_captcha:
+                raise LuoguCaptchaRequired("LUOGU_CAPTCHA_REQUIRED")
             print("[Luogu] Complete it in the opened browser.")
             input("Press Enter after CAPTCHA/submission is completed...")
             prompted = True
@@ -368,7 +378,7 @@ def wait_for_result(page, record_id):
     return "OJ_UNKNOWN", "OJ_RESULT_TIMEOUT", None, time.perf_counter() - started
 
 
-def submit_and_wait(problem_id, code, debug_dir):
+def submit_and_wait(problem_id, code, debug_dir, skip_captcha=False):
     require_gui()
     digest = hashlib.sha256(code.encode("utf-8")).hexdigest()
     sync_playwright = playwright_api()
@@ -379,7 +389,7 @@ def submit_and_wait(problem_id, code, debug_dir):
             page = context.pages[0] if context.pages else context.new_page()
             page.goto(HOME_URL, wait_until="domcontentloaded", timeout=30000)
             if not login_detected(page):
-                raise MainSiteError("Luogu login session is not available.")
+                raise LuoguLoginRequired("LUOGU_LOGIN_REQUIRED")
             open_submission_form(page, problem_id)
             ensure_code_mode(page)
             if not re.search(rf"/problem/{re.escape(problem_id)}(?:$|[?#])", page.url):
@@ -391,7 +401,7 @@ def submit_and_wait(problem_id, code, debug_dir):
             choose_cpp17(page, language)
             fill_editor(editor, code)
             submit_button.click()
-            record_id = wait_for_record(page, previous_ids)
+            record_id = wait_for_record(page, previous_ids, skip_captcha=skip_captcha)
             status, raw_status, score, judge_time = wait_for_result(page, record_id)
             return {
                 "provider": "luogu-main", "submitted": True, "record_id": record_id,

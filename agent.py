@@ -261,7 +261,7 @@ def manual_oj_entry(record, result, score, record_id):
     }
 
 
-def resume_run(run_dir, oj_result, oj_score=None, oj_record_id=None):
+def resume_run(run_dir, oj_result, oj_score=None, oj_record_id=None, append_feedback=True):
     started = time.perf_counter()
     run_dir = run_dir.resolve()
     record_path = run_dir / "record.json"
@@ -282,10 +282,11 @@ def resume_run(run_dir, oj_result, oj_score=None, oj_record_id=None):
     code = submission.read_text(encoding="utf-8")
 
     entry = manual_oj_entry(record, oj_result, oj_score, oj_record_id)
-    record["oj_history"].append(entry)
-    record["oj"] = {"provider": "luogu-manual", "submitted": True,
-                    "status": entry["status"], "raw_status": oj_result,
-                    "score": oj_score, "record_id": oj_record_id}
+    if append_feedback:
+        record["oj_history"].append(entry)
+        record["oj"] = {"provider": "luogu-manual", "submitted": True,
+                        "status": entry["status"], "raw_status": oj_result,
+                        "score": oj_score, "record_id": oj_record_id}
     print(f"[OJ] {oj_result}")
     if oj_result == "AC":
         record["final_status"] = "OJ_AC"
@@ -369,6 +370,78 @@ def resume_run(run_dir, oj_result, oj_score=None, oj_record_id=None):
             record[key] = round(record.get(key, 0), 6)
         write_json(record_path, record)
         print(f"[Record] {record_path}")
+    return return_code
+
+
+def repair_current_oj(run_dir):
+    record = json.loads((run_dir.resolve() / "record.json").read_text(encoding="utf-8"))
+    oj = record.get("oj", {})
+    status = oj.get("status", "")
+    if not re.fullmatch(r"OJ_(WA|TLE|MLE|RE|CE|PC)", status):
+        print("[OJ Repair] current official verdict is not repairable")
+        return 1
+    return resume_run(run_dir, status[3:], oj.get("score"), oj.get("record_id"),
+                      append_feedback=False)
+
+
+def resume_luogu_submission(run_dir, skip_captcha=False):
+    started = time.perf_counter()
+    run_dir = run_dir.resolve()
+    record_path = run_dir / "record.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    problem = load_resume_problem(run_dir, record)
+    if problem.get("platform") == "codeforces" or not record.get("final_sample_passed"):
+        print("[Resume] a prepared Luogu submission is required")
+        return 1
+    submission = run_dir / "submission.cpp"
+    final_source = run_dir / f"main_{record.get('final_version')}.cpp"
+    if not submission.is_file() or not final_source.is_file() or submission.read_bytes() != final_source.read_bytes():
+        print("[Resume] SUBMISSION_SOURCE_MISMATCH")
+        return 1
+    digest = hashlib.sha256(submission.read_bytes()).hexdigest()
+    from luogu_main import (LuoguCaptchaRequired, LuoguLoginRequired,
+                            MainSiteError, submit_and_wait)
+    try:
+        result = submit_and_wait(problem["problem_id"], submission.read_text(encoding="utf-8"),
+                                 run_dir / "browser_debug", skip_captcha=skip_captcha)
+        record["oj"] = result
+        record.setdefault("oj_history", []).append({
+            "attempt": len(record.get("oj_history", [])) + 1,
+            "provider": "luogu-main", "code_version": record.get("final_version"),
+            "status": result["status"], "score": result.get("score"),
+            "record_id": result.get("record_id"), "submission_sha256": digest,
+            "reported_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        })
+        record["final_status"] = result["status"]
+        record["failure_reason"] = None if result["status"] != "OJ_UNKNOWN" else "OJ_RESULT_TIMEOUT"
+        return_code = 0 if result["status"] != "OJ_UNKNOWN" else 1
+        print(f"[OJ] {result['status']}")
+    except LuoguCaptchaRequired:
+        record["oj"] = {"provider": "luogu-main", "submitted": False,
+                        "status": "CAPTCHA_SKIPPED", "submission_sha256": digest}
+        record["final_status"] = "CAPTCHA_SKIPPED"
+        record["failure_reason"] = "LUOGU_CAPTCHA_REQUIRED"
+        return_code = 2
+        print("[OJ] CAPTCHA_SKIPPED")
+    except LuoguLoginRequired:
+        record["oj"] = {"provider": "luogu-main", "submitted": False,
+                        "status": "LOGIN_REQUIRED", "submission_sha256": digest}
+        record["final_status"] = "LOGIN_REQUIRED"
+        record["failure_reason"] = "LUOGU_LOGIN_REQUIRED"
+        return_code = 3
+        print("[OJ] LUOGU_LOGIN_REQUIRED")
+    except MainSiteError as exc:
+        record["oj"] = {"provider": "luogu-main", "submitted": False,
+                        "status": "OJ_UNKNOWN", "raw_status": str(exc),
+                        "submission_sha256": digest}
+        record["final_status"] = "FAILED"
+        record["failure_reason"] = "MAIN_SUBMIT_FAILED"
+        return_code = 1
+        print(f"[OJ] FAILED: {exc}")
+    record["total_time_sec"] = round(record.get("total_time_sec", 0) + time.perf_counter() - started, 6)
+    record["finished_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+    write_json(record_path, record)
+    print(f"[Record] {record_path}")
     return return_code
 
 
@@ -510,13 +583,22 @@ def main():
                         choices=("AC", "WA", "TLE", "MLE", "RE", "CE", "PC"))
     parser.add_argument("--oj-score", type=float)
     parser.add_argument("--oj-record-id")
+    parser.add_argument("--skip-captcha", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--repair-current-oj", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.problem_path and args.legacy_problem_path:
         parser.error("provide the problem path either positionally or with --problem, not both")
     if args.resume:
-        if (args.problem_path or args.legacy_problem_path or args.submit or args.submit_main
-                or args.inject_ce):
+        if (args.problem_path or args.legacy_problem_path or args.submit or args.inject_ce):
             parser.error("--resume cannot be combined with a problem path or submission/generation options")
+        if args.repair_current_oj:
+            if args.submit_main or args.submit_cf or args.refresh_cf_verdict or args.oj_result:
+                parser.error("--repair-current-oj cannot be combined with another resume action")
+            return repair_current_oj(args.resume)
+        if args.submit_main:
+            if args.submit_cf or args.refresh_cf_verdict or args.oj_result:
+                parser.error("--submit-main cannot be combined with another resume action")
+            return resume_luogu_submission(args.resume, skip_captcha=args.skip_captcha)
         if args.submit_cf and args.refresh_cf_verdict:
             parser.error("--submit-cf and --refresh-cf-verdict are mutually exclusive")
         if args.refresh_cf_verdict:
@@ -528,7 +610,7 @@ def main():
                 parser.error("--submit-cf resume cannot use manual OJ result options")
             return resume_cf_submission(args.resume)
         if not args.oj_result:
-            parser.error("--resume requires --oj-result, --submit-cf, or --refresh-cf-verdict")
+            parser.error("--resume requires an OJ result, repair, submission, or refresh action")
         return resume_run(args.resume, args.oj_result, args.oj_score, args.oj_record_id)
     if args.refresh_cf_verdict:
         parser.error("--refresh-cf-verdict requires --resume")
@@ -664,10 +746,12 @@ def main():
                     record["oj"].update({"status": "OJ_UNKNOWN", "raw_status": type(exc).__name__})
                     print(f"[OJ] FAILED: {exc}")
             elif args.submit_main:
-                from luogu_main import MainSiteError, submit_and_wait
+                from luogu_main import (LuoguCaptchaRequired, LuoguLoginRequired,
+                                        MainSiteError, submit_and_wait)
                 try:
                     record["oj"] = submit_and_wait(
-                        problem["problem_id"], final_code, run_dir / "browser_debug")
+                        problem["problem_id"], final_code, run_dir / "browser_debug",
+                        skip_captcha=args.skip_captcha)
                     print(f"[OJ] {record['oj']['status']}")
                     record["oj_history"].append({
                         "attempt": 1, "provider": "luogu-main",
@@ -677,6 +761,20 @@ def main():
                         "submission_sha256": record["oj"]["submission_sha256"],
                         "reported_at": datetime.now().astimezone().isoformat(timespec="seconds"),
                     })
+                except LuoguCaptchaRequired:
+                    digest = hashlib.sha256(submission.read_bytes()).hexdigest()
+                    record["oj"].update({"provider": "luogu-main", "submitted": False,
+                                         "status": "CAPTCHA_SKIPPED",
+                                         "submission_sha256": digest})
+                    record["failure_reason"] = "LUOGU_CAPTCHA_REQUIRED"
+                    print("[OJ] CAPTCHA_SKIPPED")
+                except LuoguLoginRequired:
+                    digest = hashlib.sha256(submission.read_bytes()).hexdigest()
+                    record["oj"].update({"provider": "luogu-main", "submitted": False,
+                                         "status": "LOGIN_REQUIRED",
+                                         "submission_sha256": digest})
+                    record["failure_reason"] = "LUOGU_LOGIN_REQUIRED"
+                    print("[OJ] LUOGU_LOGIN_REQUIRED")
                 except MainSiteError as exc:
                     record["oj"].update({"provider": "luogu-main", "submitted": False,
                                          "status": "OJ_UNKNOWN", "raw_status": str(exc)})
@@ -712,7 +810,9 @@ def main():
         record["total_time_sec"] = time.perf_counter() - started
         record["finished_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
         oj_status = record.get("oj", {}).get("status")
-        if record["oj"].get("submitted") and oj_status:
+        if oj_status in {"CAPTCHA_SKIPPED", "LOGIN_REQUIRED"}:
+            record["final_status"] = oj_status
+        elif record["oj"].get("submitted") and oj_status:
             record["final_status"] = oj_status
         elif record["oj"].get("failure_reason"):
             record["final_status"] = oj_status or "MANUAL_SUBMISSION_TIMEOUT"
