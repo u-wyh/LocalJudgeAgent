@@ -16,9 +16,18 @@ LocalJudgeAgent 是一个本地 AI 算法解题实验系统。
 
 ```bash
 python3 agent.py problems/P1001.json
+python3 agent.py P1090
 ```
 
 题目文件统一放在 `problems/`。不传路径时，`python3 agent.py` 仍默认读取根目录的 `problem.json`。
+
+传入洛谷题号时，程序会从公开题目网页获取完整题面和样例，缓存为 `problems/<题号>.json`，然后进入同一套本地求解流程。以后运行相同题号时直接使用缓存。也可以只抓取而不调用模型：
+
+```bash
+python3 luogu.py P1030
+```
+
+抓题依赖洛谷公开网页中的内部 JSON 数据结构，并非洛谷承诺稳定的官方 API；若页面结构变化，程序会明确报告获取或解析错误。
 
 程序保存每一版 prompt、模型响应、源代码、编译和样例结果到唯一的 `runs/<题号>_<时间>/` 目录，并最多自动修复三次。查看全部实验汇总：
 
@@ -26,7 +35,7 @@ python3 agent.py problems/P1001.json
 python3 summarize.py
 ```
 
-`SAMPLE_AC` 只表示通过题目文件中的本地样例，**不等于洛谷 AC**。
+当前仍未实现洛谷提交。`SAMPLE_AC` 只表示通过题目文件中的本地样例，**不等于洛谷 AC**。
 
 可用 `python3 agent.py --inject-ce` 在 v0 注入一个编译错误，真实验证错误反馈与修复闭环；该选项仅用于测试，不改变正常生成逻辑。
 

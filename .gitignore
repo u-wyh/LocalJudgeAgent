@@ -3,3 +3,5 @@ __pycache__/
 main
 main.cpp
 runs/
+problems/P*.json
+!problems/P1001.json

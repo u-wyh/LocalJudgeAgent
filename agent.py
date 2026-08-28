@@ -12,6 +12,8 @@ from pathlib import Path
 
 import requests
 
+from luogu import LuoguError, load_or_fetch
+
 
 MODEL = "gpt-oss:20b"
 OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
@@ -187,10 +189,20 @@ def main():
     args = parser.parse_args()
     if args.problem_path and args.legacy_problem_path:
         parser.error("provide the problem path either positionally or with --problem, not both")
-    problem_path = args.problem_path or args.legacy_problem_path or ROOT / "problem.json"
+    problem_argument = args.problem_path or args.legacy_problem_path
     started = time.perf_counter()
     started_at = datetime.now().astimezone().isoformat(timespec="seconds")
-    problem = json.loads(problem_path.read_text(encoding="utf-8"))
+    try:
+        is_bare_luogu_id = (problem_argument and problem_argument.parent == Path(".")
+                            and not problem_argument.suffix and problem_argument.name.startswith("P"))
+        if is_bare_luogu_id:
+            problem, _ = load_or_fetch(problem_argument.name)
+        else:
+            problem_path = problem_argument or ROOT / "problem.json"
+            problem = json.loads(problem_path.read_text(encoding="utf-8"))
+    except LuoguError as exc:
+        print(f"[Problem] {exc.code}: {exc}")
+        return 1
     run_dir = unique_run_dir(problem["problem_id"])
     record = {
         "problem_id": problem["problem_id"], "title": problem["title"],
