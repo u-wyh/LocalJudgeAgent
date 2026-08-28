@@ -2,6 +2,7 @@
 """Sequential, resumable LocalJudgeAgent benchmark runner."""
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -85,10 +86,16 @@ def system_preflight(real_oj=False):
     if shutil.disk_usage(ROOT).free < MIN_FREE_BYTES:
         raise BatchSystemError("less than 512 MiB disk space remains")
     if real_oj:
-        checked = subprocess.run([sys.executable, "luogu_main.py", "--check-login"], cwd=ROOT,
-                                 capture_output=True, text=True, check=False)
-        if checked.returncode or "Persistent login session confirmed" not in checked.stdout:
-            raise LoginRequired("LUOGU_LOGIN_REQUIRED")
+        while True:
+            checked = subprocess.run([sys.executable, "luogu_main.py", "--check-login"], cwd=ROOT,
+                                     capture_output=True, text=True, check=False)
+            if not checked.returncode and "Persistent login session confirmed" in checked.stdout:
+                break
+            print("=" * 60)
+            print("LUOGU LOGIN REQUIRED")
+            print("Log in using the persistent Luogu browser, then press Enter.")
+            print("=" * 60)
+            input()
 
 
 def unique_batch_dir(name):
@@ -109,13 +116,17 @@ def find_run_dir(output, problem_id, before):
     return created[-1] if created else None
 
 
-def invoke(batch_dir, order, problem_id, phase, args):
+def invoke(batch_dir, order, problem_id, phase, args, interactive=False):
     stdout_path = batch_dir / f"{order:03d}_{problem_id}_{phase}.stdout.log"
     stderr_path = batch_dir / f"{order:03d}_{problem_id}_{phase}.stderr.log"
-    result = subprocess.run([sys.executable, str(ROOT / "agent.py"), *map(str, args)], cwd=ROOT,
-                            capture_output=True, text=True, check=False)
-    stdout_path.write_text(result.stdout, encoding="utf-8")
-    stderr_path.write_text(result.stderr, encoding="utf-8")
+    command = [sys.executable, str(ROOT / "agent.py"), *map(str, args)]
+    if interactive:
+        result = subprocess.run(command, cwd=ROOT, text=True, check=False)
+        result.stdout, result.stderr = "", ""
+    else:
+        result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, check=False)
+    stdout_path.write_text(result.stdout or "", encoding="utf-8")
+    stderr_path.write_text(result.stderr or "", encoding="utf-8")
     with (batch_dir / "batch.log").open("a", encoding="utf-8") as log:
         log.write(f"\n===== [{order}] {problem_id} {phase} stdout =====\n{result.stdout}")
         log.write(f"\n===== [{order}] {problem_id} {phase} stderr =====\n{result.stderr}")
@@ -124,6 +135,140 @@ def invoke(batch_dir, order, problem_id, phase, args):
 
 def read_agent_record(run_dir):
     return json.loads((run_dir / "record.json").read_text(encoding="utf-8"))
+
+
+def latest_existing_run(problem_id):
+    candidates = sorted((ROOT / "runs").glob(f"{problem_id.upper()}_*"))
+    valid = [path for path in candidates if (path / "record.json").is_file()]
+    return valid[-1] if valid else None
+
+
+def verify_existing_run(problem_id):
+    run_dir = latest_existing_run(problem_id)
+    if not run_dir:
+        return None, None, "RUN_MISSING"
+    record = read_agent_record(run_dir)
+    version = record.get("final_version")
+    submission = run_dir / "submission.cpp"
+    final_source = run_dir / f"main_{version}.cpp"
+    if not version or not submission.is_file() or not final_source.is_file():
+        return run_dir, None, "FINAL_SOURCE_MISSING"
+    content = submission.read_bytes()
+    digest = hashlib.sha256(content).hexdigest()
+    recorded = record.get("oj", {}).get("submission_sha256") or record.get("submission_sha256")
+    if content != final_source.read_bytes() or (recorded and digest != recorded):
+        return run_dir, digest, "SUBMISSION_SHA256_MISMATCH"
+    return run_dir, digest, None
+
+
+def verify_existing_cf(benchmark, verbose=True):
+    verified = []
+    for item in benchmark["problems"]:
+        run_dir, digest, error = verify_existing_run(item["id"])
+        if verbose:
+            print(f"{item['id']} {relative(run_dir) if run_dir else '-'} "
+                  f"{'PASS' if not error else error} {digest or ''}")
+        if error:
+            raise ValueError(f"{item['id']}: {error}")
+        verified.append((item, run_dir, digest))
+    print(f"Integrity verified: {len(verified)}/{len(benchmark['problems'])}")
+    return verified
+
+
+def clone_captcha_retry(problem_id):
+    candidates = sorted((ROOT / "runs").glob(f"{problem_id.upper()}_*"), reverse=True)
+    source_run = next((path for path in candidates
+                       if (path / "record.json").is_file()
+                       and read_agent_record(path).get("final_status") == "CAPTCHA_SKIPPED"), None)
+    if not source_run:
+        return None
+    record = read_agent_record(source_run)
+    version = record.get("final_version")
+    submission = source_run / "submission.cpp"
+    final_source = source_run / f"main_{version}.cpp"
+    if not submission.is_file() or not final_source.is_file() or submission.read_bytes() != final_source.read_bytes():
+        raise ValueError(f"{problem_id}: SUBMISSION_SHA256_MISMATCH")
+    base = ROOT / "runs" / f"{problem_id.upper()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_captcha_retry"
+    retry_run, suffix = base, 1
+    while retry_run.exists():
+        retry_run, suffix = Path(f"{base}_{suffix}"), suffix + 1
+    retry_run.mkdir(parents=True)
+    for name in ("problem.json", f"main_{version}.cpp", "submission.cpp"):
+        shutil.copy2(source_run / name, retry_run / name)
+    record.update({"retry_of": relative(source_run), "started_at": now_iso(), "finished_at": None,
+                   "final_status": "PREPARED_FOR_SUBMISSION", "failure_reason": None,
+                   "oj": {"provider": "luogu-main", "submitted": False,
+                          "submission_sha256": hashlib.sha256(submission.read_bytes()).hexdigest()},
+                   "oj_history": [], "oj_repair_attempts": 0})
+    atomic_json(retry_run / "record.json", record)
+    print(f"[Retry] Reusing verified source from {relative(source_run)}")
+    return retry_run
+
+
+def run_existing_cf(path, benchmark, limit=None):
+    verified = verify_existing_cf(benchmark)
+    checked = subprocess.run([sys.executable, "codeforces_main.py", "--check-login"], cwd=ROOT,
+                             capture_output=True, text=True, check=False)
+    if checked.returncode:
+        raise BatchSystemError(checked.stdout.strip() or checked.stderr.strip())
+    selected = verified[:limit] if limit else verified
+    batch_dir = unique_batch_dir(f"{benchmark['name']}_existing_submit")
+    record = {"benchmark": benchmark["name"], "benchmark_file": relative(path),
+              "platform": "codeforces", "mode": "submit_existing_cf",
+              "started_at": now_iso(), "finished_at": None, "status": "RUNNING",
+              "total": len(selected), "problems": []}
+    atomic_json(batch_dir / "batch_record.json", record)
+    for order, (item, run_dir, digest) in enumerate(selected, 1):
+        print("=" * 60)
+        print("CODEFORCES MANUAL SUBMIT REQUIRED")
+        print(f"Problem: {item['id']}")
+        print(f"Run: {relative(run_dir)}")
+        print(f"Source SHA256: {digest}")
+        print("Use the browser to complete anti-bot and click final Submit.")
+        print("=" * 60)
+        return_code = subprocess.call(
+            [sys.executable, str(ROOT / "agent.py"), "--resume", str(run_dir), "--submit-cf"],
+            cwd=ROOT)
+        current = read_agent_record(run_dir)
+        oj = current.get("oj", {})
+        entry = {"order": order, "problem_id": item["id"],
+                 "rating": current.get("rating", item.get("expected_rating")),
+                 "run_dir": relative(run_dir), "submission_id": oj.get("submission_id"),
+                 "language": oj.get("language"),
+                 "source_verified": bool(oj.get("source_match")),
+                 "raw_verdict": oj.get("raw_verdict", oj.get("raw_status")),
+                 "final_status": current.get("final_status"),
+                 "timeConsumedMillis": oj.get("timeConsumedMillis"),
+                 "memoryConsumedBytes": oj.get("memoryConsumedBytes"),
+                 "submitted": bool(oj.get("submission_confirmed")),
+                 "return_code": return_code, "finished_at": now_iso()}
+        record["problems"].append(entry)
+        atomic_json(batch_dir / "batch_record.json", record)
+        print(f"[{order}/{len(selected)}] {item['id']}: {entry['final_status']}")
+    record.update({"status": "COMPLETE", "finished_at": now_iso()})
+    atomic_json(batch_dir / "batch_record.json", record)
+    terminal = record["problems"]
+    summary = {"total": len(terminal), "submitted": sum(x["submitted"] for x in terminal),
+               "statuses": {status: sum(x["final_status"] == status for x in terminal)
+                            for status in ("OJ_AC", "OJ_WA", "OJ_TLE", "OJ_RE", "OJ_CE")},
+               "skipped": sum(x["final_status"] == "OJ_SKIPPED" for x in terminal),
+               "timeout": sum(x["final_status"] in {"OJ_UNKNOWN", "MANUAL_SUBMISSION_TIMEOUT"}
+                              for x in terminal),
+               "by_rating": {str(rating): {"problems": len([x for x in terminal if x["rating"] == rating]),
+                   "oj_ac": sum(x["final_status"] == "OJ_AC" for x in terminal if x["rating"] == rating)}
+                   for rating in (800, 900, 1000, 1100, 1200)}}
+    atomic_json(batch_dir / "batch_summary.json", summary)
+    print("\nCodeforces existing-run summary")
+    print(f"Total: {len(terminal)}")
+    print(f"Submitted: {sum(x['submitted'] for x in terminal)}")
+    for status in ("OJ_AC", "OJ_WA", "OJ_TLE", "OJ_RE", "OJ_CE"):
+        print(f"{status}: {sum(x['final_status'] == status for x in terminal)}")
+    print(f"Skipped: {sum(x['final_status'] == 'OJ_SKIPPED' for x in terminal)}")
+    print(f"Timeout: {sum(x['final_status'] in {'OJ_UNKNOWN', 'MANUAL_SUBMISSION_TIMEOUT'} for x in terminal)}")
+    for rating in (800, 900, 1000, 1100, 1200):
+        group = [x for x in terminal if x["rating"] == rating]
+        print(f"Rating {rating}: {sum(x['final_status'] == 'OJ_AC' for x in group)} / {len(group)} OJ_AC")
+    return batch_dir
 
 
 def make_result(order, item, run_dir, logs):
@@ -160,8 +305,9 @@ def run_one(batch_dir, order, item, real_oj, existing=None):
     run_dir = ROOT / existing["run_dir"] if existing and existing.get("run_dir") else None
     if not run_dir or not (run_dir / "record.json").is_file():
         before = {p.resolve() for p in (ROOT / "runs").glob(f"{item['id'].upper()}_*")}
-        args = [item["id"]] + (["--submit-main", "--skip-captcha"] if real_oj else [])
-        proc, out, err = invoke(batch_dir, order, item["id"], "initial", args)
+        args = [item["id"]] + (["--submit-main"] if real_oj else [])
+        proc, out, err = invoke(batch_dir, order, item["id"], "initial", args,
+                                interactive=real_oj)
         logs.append((out, err))
         run_dir = find_run_dir(proc.stdout, item["id"], before)
     if not real_oj:
@@ -188,12 +334,12 @@ def run_one(batch_dir, order, item, real_oj, existing=None):
             if proc.returncode:
                 return make_result(order, item, run_dir, logs)
             proc, out, err = invoke(batch_dir, order, item["id"], f"submit_{number + 1}",
-                                    ["--resume", run_dir, "--submit-main", "--skip-captcha"])
+                                    ["--resume", run_dir, "--submit-main"], interactive=True)
             logs.append((out, err))
             continue
         if status in {"PREPARED_FOR_SUBMISSION", "LOGIN_REQUIRED"}:
             proc, out, err = invoke(batch_dir, order, item["id"], "resume_submit",
-                                    ["--resume", run_dir, "--submit-main", "--skip-captcha"])
+                                    ["--resume", run_dir, "--submit-main"], interactive=True)
             logs.append((out, err))
             if proc.returncode == 3:
                 raise LoginRequired(relative(run_dir))
@@ -287,7 +433,8 @@ def checkpoint(batch_dir, record, started, base_wall):
     atomic_json(batch_dir / "batch_record.json", record)
 
 
-def run_batch(path, benchmark, resume_dir=None, limit=None, real_oj=False):
+def run_batch(path, benchmark, resume_dir=None, limit=None, real_oj=False,
+              retry_captcha_skipped=False):
     started = time.perf_counter()
     if resume_dir:
         batch_dir = resume_dir.resolve()
@@ -325,12 +472,16 @@ def run_batch(path, benchmark, resume_dir=None, limit=None, real_oj=False):
         print(f"[{order}/{len(selected)}] {item['id']}")
         running = existing or {"order": order, "problem_id": item["id"], "status": "RUNNING",
                                "started_at": now_iso()}
+        if retry_captcha_skipped and not existing:
+            retry_run = clone_captcha_retry(item["id"])
+            if retry_run:
+                running["run_dir"] = relative(retry_run)
         if not existing:
             record["problems"].append(running)
         record["current_index"] = order
         checkpoint(batch_dir, record, started, base_wall)
         try:
-            result = run_one(batch_dir, order, item, real_oj, existing)
+            result = run_one(batch_dir, order, item, real_oj, running)
         except LoginRequired as exc:
             running.update({"status": "LOGIN_REQUIRED", "run_dir": str(exc),
                             "failure_reason": "LUOGU_LOGIN_REQUIRED"})
@@ -358,6 +509,9 @@ def main():
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--limit", type=int)
     parser.add_argument("--real-oj", action="store_true")
+    parser.add_argument("--submit-existing-cf", action="store_true")
+    parser.add_argument("--check-existing-cf", action="store_true")
+    parser.add_argument("--retry-captcha-skipped", action="store_true")
     args = parser.parse_args()
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be positive")
@@ -366,6 +520,10 @@ def main():
     try:
         path = args.benchmark.resolve()
         benchmark = load_benchmark(path)
+        if (args.submit_existing_cf or args.check_existing_cf) and benchmark["platform"] != "codeforces":
+            parser.error("existing-CF modes require a Codeforces benchmark")
+        if args.retry_captcha_skipped and (not args.real_oj or benchmark["platform"] != "luogu"):
+            parser.error("--retry-captcha-skipped requires a Luogu --real-oj benchmark")
         if args.real_oj and benchmark["platform"] != "luogu":
             parser.error("--real-oj currently supports Luogu benchmarks only")
         if args.limit and args.limit > len(benchmark["problems"]):
@@ -378,7 +536,14 @@ def main():
                 suffix = f" expected_rating={item['expected_rating']}" if "expected_rating" in item else ""
                 print(f"{order:2d}. {item['id']}{suffix}")
             return 0
-        run_batch(path, benchmark, args.resume, args.limit, args.real_oj)
+        if args.check_existing_cf:
+            verify_existing_cf(benchmark)
+            return 0
+        if args.submit_existing_cf:
+            run_existing_cf(path, benchmark, args.limit)
+            return 0
+        run_batch(path, benchmark, args.resume, args.limit, args.real_oj,
+                  retry_captcha_skipped=args.retry_captcha_skipped)
         return 0
     except KeyboardInterrupt:
         return 130

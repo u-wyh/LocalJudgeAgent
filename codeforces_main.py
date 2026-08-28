@@ -340,9 +340,15 @@ def submit_and_wait(problem, code_path):
             form = locate_form(page, problem["contest_id"], problem["index"])
             select_compiler(form)
             digest = fill_source(page, form, code_path)
+            print("=" * 60)
+            print("CODEFORCES MANUAL SUBMIT REQUIRED")
+            print(f"Problem: CF{problem['problem_id']}")
+            print(f"Source SHA256: {digest}")
+            print(f"Compiler: {form['compiler']}")
+            print("Please complete anti-bot verification if shown, then click final Submit.")
+            print("The program will detect the submission and verdict automatically.")
+            print("=" * 60)
             print("[Codeforces] Submission form prepared.")
-            print("[Codeforces] Complete anti-bot verification if required.")
-            print("[Codeforces] Click Submit manually in the browser.")
             print("[Codeforces] Waiting for official submission...")
             expected_source = code_path.read_text(encoding="utf-8")
             rejected_ids = set()
@@ -378,6 +384,7 @@ def submit_and_wait(problem, code_path):
                            "submitted": True, "submission_confirmed": True,
                            "source_match": True,
                            "before_submission_id": before_id, "submission_sha256": digest})
+            result["language"] = submission.get("programmingLanguage")
             return result
         finally:
             pass  # External CDP browser must remain running

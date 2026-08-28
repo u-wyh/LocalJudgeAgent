@@ -14,6 +14,7 @@ HOME_URL = "https://www.luogu.com.cn/"
 PROFILE_DIR = Path.home() / ".local" / "share" / "LocalJudgeAgent" / "luogu-profile"
 JUDGE_TIMEOUT_SEC = 180
 POLL_INTERVAL_SEC = 1.5
+MAX_CAPTCHA_RESUMES = 5
 
 
 class MainSiteError(Exception):
@@ -319,17 +320,26 @@ def captcha_visible(page):
     return visible(text) or frames.count() > 0
 
 
-def wait_for_record(page, previous_ids, skip_captcha=False):
+def wait_for_human_captcha(problem_id, digest, resume_number):
+    if resume_number > MAX_CAPTCHA_RESUMES:
+        raise MainSiteError("LUOGU_CAPTCHA_TOO_MANY")
+    print("=" * 60)
+    print("LUOGU CAPTCHA REQUIRED")
+    print(f"Problem: {problem_id}")
+    print(f"Attempt: {resume_number}")
+    print(f"Source SHA256: {digest}")
+    print("Complete the CAPTCHA in the current browser without changing source.")
+    print("Press Enter here after verification; the same source will be refilled.")
+    print("=" * 60)
+    input()
+
+
+def wait_for_record(page, previous_ids):
     deadline = time.monotonic() + 60
-    prompted = False
     while time.monotonic() < deadline:
-        if captcha_visible(page) and not prompted:
+        if captcha_visible(page):
             print("[Luogu] CAPTCHA requires manual completion.")
-            if skip_captcha:
-                raise LuoguCaptchaRequired("LUOGU_CAPTCHA_REQUIRED")
-            print("[Luogu] Complete it in the opened browser.")
-            input("Press Enter after CAPTCHA/submission is completed...")
-            prompted = True
+            raise LuoguCaptchaRequired("LUOGU_CAPTCHA_REQUIRED")
         match = re.search(r"/record/(\d+)", page.url)
         if match and match.group(1) not in previous_ids:
             return match.group(1)
@@ -387,21 +397,52 @@ def submit_and_wait(problem_id, code, debug_dir, skip_captcha=False):
         submitted_at = datetime.now().astimezone().isoformat(timespec="seconds")
         try:
             page = context.pages[0] if context.pages else context.new_page()
-            page.goto(HOME_URL, wait_until="domcontentloaded", timeout=30000)
-            if not login_detected(page):
-                raise LuoguLoginRequired("LUOGU_LOGIN_REQUIRED")
-            open_submission_form(page, problem_id)
-            ensure_code_mode(page)
-            if not re.search(rf"/problem/{re.escape(problem_id)}(?:$|[?#])", page.url):
-                raise MainSiteError("PROBLEM_ID_MISMATCH")
-            previous_ids = record_ids(page)
-            language = locate_language(page)
-            editor = locate_editor(page)
-            submit_button = locate_final_submit(page)
-            choose_cpp17(page, language)
-            fill_editor(editor, code)
-            submit_button.click()
-            record_id = wait_for_record(page, previous_ids, skip_captcha=skip_captcha)
+            captcha_resumes = 0
+            while True:
+                page.goto(HOME_URL, wait_until="domcontentloaded", timeout=30000)
+                if not login_detected(page):
+                    if captcha_visible(page):
+                        if skip_captcha:
+                            raise LuoguCaptchaRequired("LUOGU_CAPTCHA_REQUIRED")
+                        captcha_resumes += 1
+                        wait_for_human_captcha(problem_id, digest, captcha_resumes)
+                        continue
+                    if skip_captcha:
+                        raise LuoguLoginRequired("LUOGU_LOGIN_REQUIRED")
+                    print("=" * 60)
+                    print("LUOGU LOGIN REQUIRED")
+                    print("Please log in using the persistent Luogu browser, then press Enter.")
+                    print("=" * 60)
+                    input()
+                    continue
+                try:
+                    open_submission_form(page, problem_id)
+                except MainSiteError:
+                    if not captcha_visible(page):
+                        raise
+                    if skip_captcha:
+                        raise LuoguCaptchaRequired("LUOGU_CAPTCHA_REQUIRED")
+                    captcha_resumes += 1
+                    wait_for_human_captcha(problem_id, digest, captcha_resumes)
+                    continue
+                ensure_code_mode(page)
+                if not re.search(rf"/problem/{re.escape(problem_id)}(?:$|[?#])", page.url):
+                    raise MainSiteError("PROBLEM_ID_MISMATCH")
+                previous_ids = record_ids(page)
+                language = locate_language(page)
+                editor = locate_editor(page)
+                submit_button = locate_final_submit(page)
+                choose_cpp17(page, language)
+                fill_editor(editor, code)
+                submit_button.click()
+                try:
+                    record_id = wait_for_record(page, previous_ids)
+                    break
+                except LuoguCaptchaRequired:
+                    if skip_captcha:
+                        raise
+                    captcha_resumes += 1
+                    wait_for_human_captcha(problem_id, digest, captcha_resumes)
             status, raw_status, score, judge_time = wait_for_result(page, record_id)
             return {
                 "provider": "luogu-main", "submitted": True, "record_id": record_id,

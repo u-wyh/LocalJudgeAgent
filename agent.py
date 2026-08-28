@@ -464,9 +464,11 @@ def resume_cf_submission(run_dir):
         return 1
     digest = hashlib.sha256(submission.read_bytes()).hexdigest()
     expected = record.get("oj", {}).get("submission_sha256")
-    if not expected or digest != expected or submission.read_bytes() != final_source.read_bytes():
+    if submission.read_bytes() != final_source.read_bytes() or (expected and digest != expected):
         print("[Resume] SUBMISSION_SHA256_MISMATCH")
         return 1
+    if not expected:
+        print("[Resume] legacy run has no recorded SHA; final_version byte match established trust")
     print(f"[Resume] submission SHA-256 verified: {digest}")
     from codeforces_main import CodeforcesMainError, submit_and_wait as submit_codeforces
     try:

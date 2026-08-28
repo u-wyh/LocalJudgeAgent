@@ -117,7 +117,28 @@ export XAUTHORITY=/home/wyh/.Xauthority
 python3 batch.py benchmarks/luogu_stage1_real.json --real-oj
 ```
 
-Without `--real-oj`, the Luogu list remains sample-only. Real-OJ mode permits the initial submission plus at most three OJ repairs. CAPTCHA is never solved or waited on: the problem becomes `CAPTCHA_SKIPPED` and the batch continues. A lost login pauses as `BATCH_PAUSED_LOGIN_REQUIRED`; log in again and resume with both `--real-oj` and `--resume batch_runs/<run>`.
+Without `--real-oj`, the Luogu list remains sample-only. Real-OJ mode permits the initial submission plus at most three OJ repairs. CAPTCHA and lost-login pages pause for human completion and then continue the same source attempt; neither challenge is automated.
+
+Codeforces legacy benchmark solutions can be integrity-checked and submitted in
+their original benchmark order without calling the model again:
+
+```bash
+python3 batch.py benchmarks/cf_stage1.json --check-existing-cf
+python3 batch.py benchmarks/cf_stage1.json --submit-existing-cf
+```
+
+The browser adapter fills and verifies the existing source, but the user must
+complete anti-bot verification and click the final Codeforces Submit button.
+Submission ID correlation, source verification, and verdict polling are automatic.
+
+Luogu CAPTCHA and login challenges now pause for human completion and then refill
+and resubmit the exact same source (up to five CAPTCHA resumes). They are never
+solved automatically. To retry a historical `CAPTCHA_SKIPPED` solution without
+changing its old record or calling the model, use:
+
+```bash
+python3 batch.py benchmarks/luogu_stage1_real.json --real-oj --retry-captcha-skipped
+```
 
 可用 `python3 agent.py --inject-ce` 在 v0 注入一个编译错误，真实验证错误反馈与修复闭环；该选项仅用于测试，不改变正常生成逻辑。
 
