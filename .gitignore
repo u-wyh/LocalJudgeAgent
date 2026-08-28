@@ -12,3 +12,5 @@ secrets*
 browser_debug/
 .playwright/
 *.png
+problems/codeforces/
+codeforces_main.py.bak-before-cdp

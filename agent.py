@@ -12,6 +12,7 @@ from pathlib import Path
 
 import requests
 
+from codeforces import CodeforcesError, load_or_fetch as load_or_fetch_codeforces
 from luogu import LuoguError, load_or_fetch
 from oj import OpenJudgeError, TokenNotConfigured, get_auth, judge
 
@@ -218,7 +219,11 @@ def next_version(record):
 
 
 def load_resume_problem(run_dir, record):
-    candidates = [run_dir / "problem.json", ROOT / "problems" / f"{record['problem_id']}.json"]
+    candidates = [run_dir / "problem.json"]
+    if record.get("platform") == "codeforces":
+        candidates.append(ROOT / "problems" / "codeforces" / f"{record['problem_id']}.json")
+    else:
+        candidates.append(ROOT / "problems" / f"{record['problem_id']}.json")
     if record.get("problem_id") == "P1001":
         candidates.append(ROOT / "problem.json")
     for path in candidates:
@@ -376,6 +381,8 @@ def main():
                         help="submit SAMPLE_AC code to the Luogu Open Platform")
     parser.add_argument("--submit-main", action="store_true",
                         help="submit SAMPLE_AC code through the Luogu browser UI")
+    parser.add_argument("--submit-cf", action="store_true",
+                        help="submit SAMPLE_AC code through the Codeforces browser UI")
     parser.add_argument("--resume", type=Path, help="resume an existing run directory")
     parser.add_argument("--oj-result", type=str.upper,
                         choices=("AC", "WA", "TLE", "MLE", "RE", "CE", "PC"))
@@ -385,15 +392,16 @@ def main():
     if args.problem_path and args.legacy_problem_path:
         parser.error("provide the problem path either positionally or with --problem, not both")
     if args.resume:
-        if args.problem_path or args.legacy_problem_path or args.submit or args.submit_main or args.inject_ce:
+        if (args.problem_path or args.legacy_problem_path or args.submit or args.submit_main
+                or args.submit_cf or args.inject_ce):
             parser.error("--resume cannot be combined with a problem path or submission/generation options")
         if not args.oj_result:
             parser.error("--resume requires --oj-result")
         return resume_run(args.resume, args.oj_result, args.oj_score, args.oj_record_id)
     if args.oj_result or args.oj_score is not None or args.oj_record_id:
         parser.error("OJ feedback options require --resume")
-    if args.submit and args.submit_main:
-        parser.error("--submit and --submit-main are mutually exclusive")
+    if sum((args.submit, args.submit_main, args.submit_cf)) > 1:
+        parser.error("--submit, --submit-main, and --submit-cf are mutually exclusive")
     if args.submit_main:
         from luogu_main import MainSiteError, playwright_api, require_gui
         try:
@@ -401,6 +409,14 @@ def main():
             playwright_api()
         except MainSiteError as exc:
             print(f"[Luogu] {exc}")
+            return 1
+    if args.submit_cf:
+        from codeforces_main import CodeforcesMainError, playwright_api, require_gui
+        try:
+            require_gui()
+            playwright_api()
+        except CodeforcesMainError as exc:
+            print(f"[Codeforces] {exc}")
             return 1
     if args.submit:
         try:
@@ -414,15 +430,20 @@ def main():
     try:
         is_bare_luogu_id = (problem_argument and problem_argument.parent == Path(".")
                             and not problem_argument.suffix and problem_argument.name.startswith("P"))
-        if is_bare_luogu_id:
+        is_codeforces_id = (problem_argument and problem_argument.parent == Path(".")
+                            and re.fullmatch(r"CF\d+[A-Za-z][A-Za-z0-9]*", problem_argument.name, re.I))
+        if is_codeforces_id:
+            problem, _ = load_or_fetch_codeforces(problem_argument.name)
+        elif is_bare_luogu_id:
             problem, _ = load_or_fetch(problem_argument.name)
         else:
             problem_path = problem_argument or ROOT / "problem.json"
             problem = json.loads(problem_path.read_text(encoding="utf-8"))
-    except LuoguError as exc:
+    except (LuoguError, CodeforcesError) as exc:
         print(f"[Problem] {exc.code}: {exc}")
         return 1
-    run_dir = unique_run_dir(problem["problem_id"])
+    run_name = f"CF{problem['problem_id']}" if problem.get("platform") == "codeforces" else problem["problem_id"]
+    run_dir = unique_run_dir(run_name)
     write_json(run_dir / "problem.json", problem)
     record = {
         "problem_id": problem["problem_id"], "title": problem["title"],
@@ -434,6 +455,8 @@ def main():
         "started_at": started_at, "finished_at": None, "final_status": "FAILED",
         "oj": {"provider": "luogu-open", "submitted": False},
         "oj_repair_attempts": 0, "oj_history": [],
+        "platform": problem.get("platform", "luogu"),
+        "rating": problem.get("rating"), "tags": problem.get("tags", []),
     }
     print(f"[Problem] {problem['problem_id']} {problem['title']}")
     print(f"[Model] {MODEL}")
@@ -522,6 +545,23 @@ def main():
                     })
                 except MainSiteError as exc:
                     record["oj"].update({"provider": "luogu-main", "submitted": False,
+                                         "status": "OJ_UNKNOWN", "raw_status": str(exc)})
+                    print(f"[OJ] FAILED: {exc}")
+            elif args.submit_cf:
+                from codeforces_main import CodeforcesMainError, submit_and_wait as submit_codeforces
+                try:
+                    record["oj"] = submit_codeforces(problem, submission)
+                    print(f"[OJ] {record['oj']['status']}")
+                    record["oj_history"].append({
+                        "attempt": 1, "provider": "codeforces-main",
+                        "code_version": record["final_version"],
+                        "status": record["oj"]["status"], "score": None,
+                        "submission_id": record["oj"].get("submission_id"),
+                        "submission_sha256": record["oj"]["submission_sha256"],
+                        "reported_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                    })
+                except (CodeforcesMainError, CodeforcesError) as exc:
+                    record["oj"].update({"provider": "codeforces-main", "submitted": False,
                                          "status": "OJ_UNKNOWN", "raw_status": str(exc)})
                     print(f"[OJ] FAILED: {exc}")
     except (requests.RequestException, KeyError, TypeError, json.JSONDecodeError) as exc:

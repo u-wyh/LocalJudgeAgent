@@ -30,7 +30,7 @@ def oj_statuses(record):
 
 def main():
     records = load_records()
-    headers = ("Problem", "Difficulty", "FirstPass", "Repairs", "Sample", "OJ",
+    headers = ("Problem", "Platform", "Difficulty/Rating", "FirstPass", "Repairs", "Sample", "OJ",
                "OJAttempts", "OJRepairs", "TotalTime")
     rows = []
     for record in records:
@@ -41,7 +41,9 @@ def main():
         oj_attempts = len(statuses)
         rows.append((
             str(record.get("problem_id", "?")),
-            str(record.get("difficulty", "")),
+            str(record.get("platform", "luogu")),
+            str(record.get("rating") if record.get("platform") == "codeforces"
+                else record.get("difficulty", "")),
             "YES" if record.get("first_generation_success", False) else "NO",
             str(record.get("repair_attempts", 0)),
             sample_status,

@@ -84,6 +84,17 @@ CAPTCHA, when presented, must be completed manually. The browser profile contain
 
 The adapter uses the normal Luogu browser submission UI with the persistent authenticated profile and manual CAPTCHA handling. Main-site UI changes may require locator updates. A non-submitting compatibility check is available with `luogu_main.py --inspect Pxxxx --code submission.cpp`; add `--dry-fill` to verify C++17 selection and editor content without clicking the submit button.
 
+## Codeforces
+
+Codeforces problemset/archive problems use the `CF` prefix and reuse the same solver and local judge:
+
+```bash
+python3 agent.py CF4A
+python3 agent.py CF4A --submit-cf
+```
+
+The official Codeforces API supplies metadata and verdicts; the normal headed browser UI is used for submission with a separate persistent profile. The browser adapter connects to the existing direct-network Chromium CDP endpoint at `http://127.0.0.1:9222`; it does not launch another browser. Cloudflare or human verification must be completed manually. Active contests and virtual participation are explicitly unsupported. Use `codeforces_main.py --login`, `--check-login`, and `--inspect 4A --code submission.cpp [--dry-fill]` to prepare the browser adapter without submitting.
+
 可用 `python3 agent.py --inject-ce` 在 v0 注入一个编译错误，真实验证错误反馈与修复闭环；该选项仅用于测试，不改变正常生成逻辑。
 
 未来目标：题目自动获取 → 本地增强测试 → OJ Adapter → 获取真实评测反馈 → 自动修复 → 批量成功率实验。
