@@ -5,3 +5,7 @@ main.cpp
 runs/
 problems/P*.json
 !problems/P1001.json
+.env
+.env.*
+credentials*
+secrets*

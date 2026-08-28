@@ -35,7 +35,18 @@ python3 luogu.py P1030
 python3 summarize.py
 ```
 
-当前仍未实现洛谷提交。`SAMPLE_AC` 只表示通过题目文件中的本地样例，**不等于洛谷 AC**。
+默认模式只完成本地样例评测。`SAMPLE_AC` 只表示通过题目文件中的本地样例，**不等于洛谷 AC**。
+
+## Online Judge
+
+LocalJudgeAgent can optionally use the official Luogu Open Platform for real judge evaluation after local samples pass.
+
+```bash
+export LUOGU_OPEN_TOKEN='username:password'
+python3 agent.py P1001 --submit
+```
+
+The token must never be committed to Git. Online judging uses GNU C++17 (`cxx/17/gcc`) and does not fall back to automated submission on the main Luogu website. `SAMPLE_AC != OJ_AC`.
 
 可用 `python3 agent.py --inject-ce` 在 v0 注入一个编译错误，真实验证错误反馈与修复闭环；该选项仅用于测试，不改变正常生成逻辑。
 

@@ -13,6 +13,7 @@ from pathlib import Path
 import requests
 
 from luogu import LuoguError, load_or_fetch
+from oj import OpenJudgeError, TokenNotConfigured, get_auth, judge
 
 
 MODEL = "gpt-oss:20b"
@@ -186,9 +187,17 @@ def main():
                         help=argparse.SUPPRESS)
     parser.add_argument("--inject-ce", action="store_true",
                         help="test repair by replacing v0 with a deliberate compile error")
+    parser.add_argument("--submit", action="store_true",
+                        help="submit SAMPLE_AC code to the Luogu Open Platform")
     args = parser.parse_args()
     if args.problem_path and args.legacy_problem_path:
         parser.error("provide the problem path either positionally or with --problem, not both")
+    if args.submit:
+        try:
+            get_auth()
+        except (TokenNotConfigured, OpenJudgeError) as exc:
+            print(exc)
+            return 1
     problem_argument = args.problem_path or args.legacy_problem_path
     started = time.perf_counter()
     started_at = datetime.now().astimezone().isoformat(timespec="seconds")
@@ -212,6 +221,7 @@ def main():
         "compile_time_sec": 0, "run_time_sec": 0, "code_versions": [],
         "final_version": None, "failure_reason": None,
         "started_at": started_at, "finished_at": None, "final_status": "FAILED",
+        "oj": {"provider": "luogu-open", "submitted": False},
     }
     print(f"[Problem] {problem['problem_id']} {problem['title']}")
     print(f"[Model] {MODEL}")
@@ -268,6 +278,14 @@ def main():
         if not record["final_sample_passed"]:
             record["failure_reason"] = last_reason
             print(f"[Result] FAIL ({last_reason})")
+        elif args.submit:
+            final_code = (run_dir / f"main_{record['final_version']}.cpp").read_text(encoding="utf-8")
+            try:
+                record["oj"] = judge(problem["problem_id"], final_code)
+                print(f"[OJ] {record['oj']['status']}")
+            except (requests.RequestException, OpenJudgeError) as exc:
+                record["oj"].update({"status": "OJ_UNKNOWN", "raw_status": type(exc).__name__})
+                print(f"[OJ] FAILED: {exc}")
     except (requests.RequestException, KeyError, TypeError, json.JSONDecodeError) as exc:
         record["failure_reason"] = "MODEL_ERROR"
         (run_dir / "error.txt").write_text(repr(exc) + "\n", encoding="utf-8")
