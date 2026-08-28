@@ -249,6 +249,24 @@ def fill_source(page, form, code_path):
     return expected
 
 
+def anti_bot_required(page):
+    try:
+        return "please complete the anti-bot verification" in page.locator("body").inner_text().lower()
+    except Exception:
+        return False
+
+
+def blocked_result(digest, clicks, history, reason, before_id):
+    return {
+        "provider": "codeforces-main", "submit_clicked": clicks > 0,
+        "browser_submit_clicks": clicks, "browser_submit_history": history,
+        "submitted": False, "submission_confirmed": False, "submission_id": None,
+        "status": "SUBMISSION_BLOCKED", "raw_status": reason,
+        "failure_reason": reason, "before_submission_id": before_id,
+        "submission_sha256": digest,
+    }
+
+
 def inspect(contest_id, index, code_path, dry_fill=False):
     require_gui()
     with playwright_api()() as playwright:
@@ -283,10 +301,12 @@ def submit_and_wait(problem, code_path):
     if problem.get("contest_phase") != "FINISHED":
         raise CodeforcesMainError("ACTIVE_CONTEST_NOT_SUPPORTED")
     require_gui()
-    from codeforces import get_user_submissions, wait_for_verdict
+    from codeforces import get_user_submissions, wait_for_submission, wait_for_verdict
     handle = configured_handle()
     before = get_user_submissions(handle)
     before_id = max((item.get("id", 0) for item in before), default=0)
+    clicks = 0
+    history = []
     with playwright_api()() as playwright:
         context = open_context(playwright)
         try:
@@ -299,9 +319,42 @@ def submit_and_wait(problem, code_path):
             select_compiler(form)
             digest = fill_source(page, form, code_path)
             form["submit"].click()
-            result = wait_for_verdict(handle, before_id, problem["contest_id"], problem["index"])
-            result.update({"provider": "codeforces-main", "submitted": True,
-                           "submission_sha256": digest})
+            clicks += 1
+            if anti_bot_required(page):
+                history.append({"click": clicks, "result": "CF_ANTI_BOT_REQUIRED",
+                                "submission_created": False})
+                print("[Codeforces] Anti-bot verification requires manual completion.")
+                print("[Codeforces] Complete it in the opened browser.")
+                input("[Codeforces] Press Enter after verification is complete.")
+                page.goto(HOME_URL, wait_until="domcontentloaded", timeout=30000)
+                if logged_in_handle(page) != handle:
+                    return blocked_result(digest, clicks, history, "CF_LOGIN_LOST", before_id)
+                open_submit_page(page, problem["contest_id"], problem["index"])
+                form = locate_form(page, problem["contest_id"], problem["index"])
+                select_compiler(form)
+                digest = fill_source(page, form, code_path)
+                print("[Codeforces] Submit form restored and source re-verified.")
+                form["submit"].click()
+                clicks += 1
+                if anti_bot_required(page):
+                    history.append({"click": clicks, "result": "CF_ANTI_BOT_REQUIRED",
+                                    "submission_created": False})
+                    return blocked_result(digest, clicks, history, "CF_ANTI_BOT_REQUIRED", before_id)
+
+            submission = wait_for_submission(
+                handle, before_id, problem["contest_id"], problem["index"])
+            if not submission:
+                history.append({"click": clicks, "result": "CF_SUBMISSION_NOT_FOUND",
+                                "submission_created": False})
+                return blocked_result(digest, clicks, history, "CF_SUBMISSION_NOT_FOUND", before_id)
+            submission_id = submission["id"]
+            history.append({"click": clicks, "result": "SUBMISSION_CONFIRMED",
+                            "submission_created": True, "submission_id": submission_id})
+            result = wait_for_verdict(handle, submission_id)
+            result.update({"provider": "codeforces-main", "submit_clicked": True,
+                           "browser_submit_clicks": clicks, "browser_submit_history": history,
+                           "submitted": True, "submission_confirmed": True,
+                           "before_submission_id": before_id, "submission_sha256": digest})
             return result
         finally:
             pass  # External CDP browser must remain running

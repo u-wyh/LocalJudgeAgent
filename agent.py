@@ -2,6 +2,7 @@
 """LocalJudgeAgent Phase 1: generate, compile, sample-test, and repair C++ code."""
 
 import argparse
+import hashlib
 import json
 import re
 import shutil
@@ -369,6 +370,71 @@ def resume_run(run_dir, oj_result, oj_score=None, oj_record_id=None):
     return return_code
 
 
+def resume_cf_submission(run_dir):
+    started = time.perf_counter()
+    run_dir = run_dir.resolve()
+    record_path = run_dir / "record.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    problem = load_resume_problem(run_dir, record)
+    if record.get("platform") != "codeforces" or problem.get("platform") != "codeforces":
+        print("[Resume] --submit-cf requires a Codeforces run")
+        return 1
+    if not record.get("final_sample_passed"):
+        print("[Resume] code is not prepared for submission")
+        return 1
+    submission = run_dir / "submission.cpp"
+    final_source = run_dir / f"main_{record.get('final_version')}.cpp"
+    if not submission.is_file() or not final_source.is_file():
+        print("[Resume] final submission files are missing")
+        return 1
+    digest = hashlib.sha256(submission.read_bytes()).hexdigest()
+    expected = record.get("oj", {}).get("submission_sha256")
+    if not expected or digest != expected or submission.read_bytes() != final_source.read_bytes():
+        print("[Resume] SUBMISSION_SHA256_MISMATCH")
+        return 1
+    print(f"[Resume] submission SHA-256 verified: {digest}")
+    from codeforces_main import CodeforcesMainError, submit_and_wait as submit_codeforces
+    try:
+        result = submit_codeforces(problem, submission)
+    except (CodeforcesMainError, CodeforcesError) as exc:
+        print(f"[OJ] FAILED: {exc}")
+        return 1
+
+    previous = record.get("browser_submit_history", [])
+    offset = len(previous)
+    current = result.get("browser_submit_history", [])
+    for entry in current:
+        entry["click"] = entry.get("click", 0) + offset
+    merged = previous + current
+    result["browser_submit_history"] = merged
+    result["browser_submit_clicks"] = len(merged)
+    record["browser_submit_history"] = merged
+    record["oj"] = result
+    if result.get("submission_confirmed") and result.get("submission_id") is not None:
+        record.setdefault("oj_history", []).append({
+            "attempt": len(record.get("oj_history", [])) + 1,
+            "provider": "codeforces-main", "code_version": record.get("final_version"),
+            "status": result["status"], "score": None,
+            "submission_id": result["submission_id"],
+            "submission_sha256": result["submission_sha256"],
+            "reported_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        })
+        record["final_status"] = result["status"]
+        record["failure_reason"] = None
+        return_code = 0
+    else:
+        record["final_status"] = "SUBMISSION_BLOCKED"
+        record["failure_reason"] = result.get("failure_reason", "CF_SUBMISSION_NOT_FOUND")
+        return_code = 1
+    record["total_time_sec"] = round(
+        record.get("total_time_sec", 0) + time.perf_counter() - started, 6)
+    record["finished_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+    write_json(record_path, record)
+    print(f"[OJ] {record['final_status']}")
+    print(f"[Record] {record_path}")
+    return return_code
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("problem_path", nargs="?", type=Path,
@@ -393,10 +459,14 @@ def main():
         parser.error("provide the problem path either positionally or with --problem, not both")
     if args.resume:
         if (args.problem_path or args.legacy_problem_path or args.submit or args.submit_main
-                or args.submit_cf or args.inject_ce):
+                or args.inject_ce):
             parser.error("--resume cannot be combined with a problem path or submission/generation options")
+        if args.submit_cf:
+            if args.oj_result or args.oj_score is not None or args.oj_record_id:
+                parser.error("--submit-cf resume cannot use manual OJ result options")
+            return resume_cf_submission(args.resume)
         if not args.oj_result:
-            parser.error("--resume requires --oj-result")
+            parser.error("--resume requires --oj-result or --submit-cf")
         return resume_run(args.resume, args.oj_result, args.oj_score, args.oj_record_id)
     if args.oj_result or args.oj_score is not None or args.oj_record_id:
         parser.error("OJ feedback options require --resume")
@@ -552,14 +622,16 @@ def main():
                 try:
                     record["oj"] = submit_codeforces(problem, submission)
                     print(f"[OJ] {record['oj']['status']}")
-                    record["oj_history"].append({
-                        "attempt": 1, "provider": "codeforces-main",
-                        "code_version": record["final_version"],
-                        "status": record["oj"]["status"], "score": None,
-                        "submission_id": record["oj"].get("submission_id"),
-                        "submission_sha256": record["oj"]["submission_sha256"],
-                        "reported_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-                    })
+                    record["browser_submit_history"] = record["oj"].get("browser_submit_history", [])
+                    if record["oj"].get("submission_confirmed"):
+                        record["oj_history"].append({
+                            "attempt": 1, "provider": "codeforces-main",
+                            "code_version": record["final_version"],
+                            "status": record["oj"]["status"], "score": None,
+                            "submission_id": record["oj"].get("submission_id"),
+                            "submission_sha256": record["oj"]["submission_sha256"],
+                            "reported_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                        })
                 except (CodeforcesMainError, CodeforcesError) as exc:
                     record["oj"].update({"provider": "codeforces-main", "submitted": False,
                                          "status": "OJ_UNKNOWN", "raw_status": str(exc)})
@@ -578,6 +650,9 @@ def main():
         oj_status = record.get("oj", {}).get("status")
         if record["oj"].get("submitted") and oj_status:
             record["final_status"] = oj_status
+        elif record["oj"].get("submit_clicked"):
+            record["final_status"] = "SUBMISSION_BLOCKED"
+            record["failure_reason"] = record["oj"].get("failure_reason")
         elif record["final_sample_passed"]:
             record["final_status"] = "PREPARED_FOR_SUBMISSION"
         else:

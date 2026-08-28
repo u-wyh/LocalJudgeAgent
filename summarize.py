@@ -22,6 +22,13 @@ def load_records():
 
 def oj_statuses(record):
     history = record.get("oj_history") or []
+    if record.get("platform") == "codeforces":
+        confirmed = [entry for entry in history if entry.get("submission_id") is not None]
+        if confirmed:
+            return [entry.get("status", "OJ_UNKNOWN") for entry in confirmed]
+        oj = record.get("oj", {})
+        return [oj.get("status", "OJ_UNKNOWN")] if (
+            oj.get("submitted") and oj.get("submission_id") is not None) else []
     if history:
         return [entry.get("status", "OJ_UNKNOWN") for entry in history]
     status = record.get("oj", {}).get("status")
@@ -37,7 +44,7 @@ def main():
         passed = bool(record.get("final_sample_passed", False))
         sample_status = "SAMPLE_AC" if passed else "FAILED"
         statuses = oj_statuses(record)
-        oj = statuses[-1] if statuses else "-"
+        oj = statuses[-1] if statuses else str(record.get("oj", {}).get("status", "-"))
         oj_attempts = len(statuses)
         rows.append((
             str(record.get("problem_id", "?")),

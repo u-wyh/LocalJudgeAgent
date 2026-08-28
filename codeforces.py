@@ -16,6 +16,7 @@ API_BASE = "https://codeforces.com/api"
 API_INTERVAL_SEC = 2.1
 API_LOCK = Path.home() / ".cache" / "LocalJudgeAgent" / "codeforces-api.lock"
 VERDICT_POLL_SEC = 2.5
+SUBMISSION_FIND_TIMEOUT_SEC = 30
 VERDICT_TIMEOUT_SEC = 180
 
 
@@ -149,20 +150,32 @@ def normalize_verdict(verdict):
     }.get(verdict, "OJ_UNKNOWN")
 
 
-def wait_for_verdict(handle, before_id, contest_id, index):
+def wait_for_submission(handle, before_id, contest_id, index):
+    deadline = time.monotonic() + SUBMISSION_FIND_TIMEOUT_SEC
+    while time.monotonic() < deadline:
+        submission = find_submission(get_user_submissions(handle), before_id, contest_id, index)
+        if submission:
+            return submission
+        time.sleep(VERDICT_POLL_SEC)
+    return None
+
+
+def wait_for_verdict(handle, submission_id):
     started = time.perf_counter()
     deadline = time.monotonic() + VERDICT_TIMEOUT_SEC
-    submission = None
     while time.monotonic() < deadline:
         submissions = get_user_submissions(handle)
-        submission = find_submission(submissions, before_id, contest_id, index)
+        submission = next((item for item in submissions if item.get("id") == submission_id), None)
         if submission and submission.get("verdict"):
             verdict = submission["verdict"]
             return {"submission_id": submission["id"], "status": normalize_verdict(verdict),
-                    "raw_status": verdict, "judge_time_sec": round(time.perf_counter() - started, 6)}
+                    "raw_status": verdict, "raw_verdict": verdict,
+                    "timeConsumedMillis": submission.get("timeConsumedMillis"),
+                    "memoryConsumedBytes": submission.get("memoryConsumedBytes"),
+                    "judge_time_sec": round(time.perf_counter() - started, 6)}
         time.sleep(VERDICT_POLL_SEC)
-    return {"submission_id": submission.get("id") if submission else None,
-            "status": "OJ_UNKNOWN", "raw_status": "OJ_RESULT_TIMEOUT",
+    return {"submission_id": submission_id, "status": "OJ_UNKNOWN",
+            "raw_status": "OJ_RESULT_TIMEOUT", "raw_verdict": None,
             "judge_time_sec": round(time.perf_counter() - started, 6)}
 
 

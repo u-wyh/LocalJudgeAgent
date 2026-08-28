@@ -91,9 +91,10 @@ Codeforces problemset/archive problems use the `CF` prefix and reuse the same so
 ```bash
 python3 agent.py CF4A
 python3 agent.py CF4A --submit-cf
+python3 agent.py --resume runs/CF4A_xxx --submit-cf
 ```
 
-The official Codeforces API supplies metadata and verdicts; the normal headed browser UI is used for submission with a separate persistent profile. The browser adapter connects to the existing direct-network Chromium CDP endpoint at `http://127.0.0.1:9222`; it does not launch another browser. Cloudflare or human verification must be completed manually. Active contests and virtual participation are explicitly unsupported. Use `codeforces_main.py --login`, `--check-login`, and `--inspect 4A --code submission.cpp [--dry-fill]` to prepare the browser adapter without submitting.
+The official Codeforces API supplies metadata and verdicts; the normal headed browser UI is used for submission with a separate persistent profile. The browser adapter connects to the existing direct-network Chromium CDP endpoint at `http://127.0.0.1:9222`; it does not launch another browser. Cloudflare or human verification must be completed manually. When anti-bot verification clears the file input, the adapter waits for the user, restores and re-verifies the original `submission.cpp`, and permits one post-verification retry. `oj.submitted` is true only after `user.status` confirms a real submission ID. The resume form verifies the saved SHA-256 and never calls the model. Active contests and virtual participation are explicitly unsupported. Use `codeforces_main.py --login`, `--check-login`, and `--inspect 4A --code submission.cpp [--dry-fill]` to prepare the browser adapter without submitting.
 
 可用 `python3 agent.py --inject-ce` 在 v0 注入一个编译错误，真实验证错误反馈与修复闭环；该选项仅用于测试，不改变正常生成逻辑。
 
